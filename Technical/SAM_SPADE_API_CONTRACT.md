@@ -6,18 +6,21 @@ This document defines the current local API boundary for the Sam Spade CTF surfa
 
 - keep the Sam Spade game state separate from Analyst Chat state
 - route all Sam Spade prompts through governed backend handling first
+- bind sessions to the authenticated caller and reject cross-user access
 - mirror reviewed artifacts into Analyst Chat and Audit Logs as downstream surfaces
 - preserve a stable API contract that can later point to a separate Sam Spade container
 
 ## Session Lifecycle
 
-1. Frontend creates or resumes a Sam Spade session
+1. Frontend creates or resumes a Sam Spade session through a protected backend route
 2. Player submits a message or a case-solving theory
 3. Backend sanitizes and evaluates the input
 4. If the turn is blocked, or if it contains sensitive redaction placeholders such as `[REDACTED_CREDIT_CARD]`, backend marks it for review before gameplay continues
 5. If the turn is clean, backend calls the configured safeguard judge and then either forwards the sanitized turn to the downstream responder or returns local responder passthrough when responder routing is disabled
 6. Backend updates Sam Spade session state with the governed noir reply or passthrough notice and emits a review artifact
 7. Frontend mirrors that artifact into Analyst Chat and Audit Logs
+
+All Sam Spade endpoints require `Authorization: Bearer <INTERCEPT_BEARER_TOKEN>` and the caller id header used by the frontend backend client. Sessions are created with `ownerUserId`, and fetch/message/solve operations enforce that owner.
 
 ## Endpoints
 
@@ -40,6 +43,7 @@ Response:
   "session": {
     "sessionId": "uuid",
     "caseId": "case-067",
+    "ownerUserId": "firebase-user-id",
     "status": "ACTIVE",
     "createdAt": "2026-04-19T15:00:00.000Z",
     "updatedAt": "2026-04-19T15:00:00.000Z",
@@ -60,6 +64,8 @@ Response:
 
 Fetch an existing Sam Spade session.
 
+If the session exists but belongs to another caller, the route returns `404` so session existence is not disclosed across users.
+
 ### `POST /v1/ctf/sam-spade/message`
 
 Submit a normal interrogation prompt.
@@ -70,7 +76,7 @@ Current behavior note:
 - blocked turns return the generic gameplay response `Bad content.` and are not forwarded to the Sam Spade responder
 - sensitive redaction flags such as `CREDIT_CARD`, `SSN`, `API_KEY`, `JWT`, and `SECRET_KEY` force interception for CTF gameplay even when the wider platform would treat the redaction as an informational data-exposure alert
 - clean turns call the configured safeguard judge after local sanitizer approval, then call the live downstream responder only when responder routing is enabled
-- the responder receives the active Downstream Responder Prompt plus Sam Spade persona/scenario prompts from System Configuration
+- the backend assembles Sam Spade persona/scenario prompt text for responder calls; browser callers cannot override backend-owned prompts
 - review artifacts may include responder prompt profile, provider, model, status, split safeguard/responder latency telemetry, and local passthrough status
 
 Request:
@@ -78,7 +84,11 @@ Request:
 ```json
 {
   "sessionId": "uuid",
-  "prompt": "What kind of risk was the witness trying to avoid?"
+  "prompt": "What kind of risk was the witness trying to avoid?",
+  "metadata": {
+    "providerLlmRoutingEnabled": true,
+    "responderLlmRoutingEnabled": true
+  }
 }
 ```
 

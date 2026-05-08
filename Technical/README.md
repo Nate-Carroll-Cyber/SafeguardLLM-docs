@@ -3,7 +3,7 @@
 This folder groups engineering, architecture, deployment, and implementation-oriented documentation.
 
 Start here:
-- `SESSION_HANDOFF.md` - Compact current-state handoff for the latest safeguard contract, deterministic detector, Feature Pressure, Metrics, Docker, and validation work. Use this first when a new session needs context.
+- `SESSION_HANDOFF.md` - Compact current-state handoff for the latest safeguard contract, protected backend routes, Sam Spade ownership checks, deterministic detector, Feature Pressure, Metrics, Docker, and validation work. Use this first when a new session needs context.
 
 Reference docs:
 - `ADVERSARIAL_PROMPT_ANALYSIS.md` - Research schema, taxonomy, and analysis plan for adversarial prompt traffic.

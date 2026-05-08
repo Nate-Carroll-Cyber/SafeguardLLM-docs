@@ -24,8 +24,8 @@ If an enterprise deploys an LLM or downstream responder API without an intermedi
 #### **3. Article 12: Record-Keeping (Logging)**
 *High-risk systems must automatically record events (logs) throughout their lifecycle to ensure traceability, monitor anomalies, and facilitate post-incident investigations.*
 * **Advanced Audit Trail:** The platform logs every interaction via a strict Firestore schema (capturing `userId`, `sessionId`, `timestamp`, `entropy`, and `detectionFlags`). 
-* **Anomaly Detection Dashboard:** Features real-time Z-Score calculations to track the velocity of threats, satisfying the requirement to monitor and log system performance and anomalies continuously.
-* **Full Prompt Inspection:** Retains the exact prompts and AI responses, allowing regulators and internal auditors to trace the exact lineage of an AI interaction.
+* **Anomaly Detection Dashboard:** Current Beta metrics expose real-time threat velocity, alert severity, and review status from audit records. Formal Z-score incidenting and external alert delivery should be supplied by the production telemetry pipeline.
+* **Full Prompt Inspection:** Current Beta audit views retain sanitized prompts, AI responses, detection metadata, and backend telemetry so reviewers can trace governed interactions without re-exposing raw sensitive payloads. Raw prompt retention, if required, should be added as a controlled production audit store.
 
 #### **4. Article 10: Data and Data Governance (and GDPR Alignment)**
 *AI systems must be trained and operated using data subject to appropriate data governance and management practices, specifically regarding privacy and bias.*

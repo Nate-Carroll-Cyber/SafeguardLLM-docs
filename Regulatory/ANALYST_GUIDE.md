@@ -5,6 +5,7 @@
 | v2.0 | 2026-04-21 | Promotion to Beta: stabilized local demo stack, guarded backend responder path, Lara translation modes, Sam Spade governed intake, and layered defense funnel metrics. |
 | v2.1 | 2026-04-25 | Runtime sync: backend safeguard attribution is now structured in audit/metrics records, and blocked Sam Spade CTF content is masked as `Bad content.` on gameplay surfaces. |
 | v2.2 | 2026-05-07 | Instruction similarity monitor: backend pgvector memory now detects exact, loose-hash, SimHash, and semantic prompt matches before responder forwarding. Adversarial fingerprint reuse blocks; semantic overlap routes to suspicious review. The local demo database is clean on Postgres container recreation. |
+| v2.3 | 2026-05-08 | Security remediation: protected execution routes now require backend bearer auth, browser-supplied backend runtime overrides are rejected, Lara translation is backend-configured only, Sam Spade sessions are owner-scoped, and Firestore audit-log creates have a tighter allowlist. |
 
 ---
 
@@ -20,15 +21,15 @@ As an Analyst or Administrator, your role is to monitor the threat landscape, tu
 
 The **Metrics** tab provides a high-level view of the platform's health and the current threat velocity.
 
-### 2.1 Threat Velocity & Z-Score Spikes
+### 2.1 Threat Velocity & Spike Indicators
 The dashboard tracks the rate of "Threats" (Suspicious or Adversarial logs) over a rolling 24-hour window.
 *   **Threat Velocity:** Represented as a percentage change. A value of `+500%` indicates that current threat activity is five times higher than the recent baseline.
-*   **Z-Score Spike:** This metric measures how many standard deviations the current threat rate is from the mean. 
-    *   **Z-Score > 2.0:** Indicates a statistically significant increase in activity.
-    *   **Z-Score > 5.0:** Represents a critical anomaly, likely a coordinated automated attack or a "jailbreak" attempt going viral.
+*   **Current Beta Spike Indicator:** The Metrics surface exposes threat velocity and alert-severity trends from audit records. Formal Z-score incidenting should be calculated in the production telemetry pipeline if your deployment uses statistical thresholds.
+    *   **Elevated spike indicator:** Increase monitoring cadence and check repeated payloads from a single `userId`.
+    *   **Critical spike indicator:** Treat as likely coordinated automation and evaluate Global System Pause.
 
 > [!IMPORTANT]
-> **Notification Escalation:** When a Z-Score exceeds **5.0**, the system automatically triggers a high-priority alert. In production environments, this is integrated with **PagerDuty** and **Slack (#soc-alerts)** to ensure immediate analyst response.
+> **Notification Escalation:** PagerDuty/Slack delivery is a planned production integration, not current repo functionality. In the current Beta, operators should manually escalate critical spike indicators.
 
 > [!TIP]
 > Audit records retain a `source` marker such as `analyst_chat`, `bulk_ingest`, `playground`, or `ctf_chat`, so Bulk Ingest and Sam Spade CTF traffic can be compared against analyst-entered traffic without removing it from the main dashboards.
@@ -137,7 +138,7 @@ Not every flagged log is suitable for the Golden Set. To ensure high-quality tra
 
 | Flag | Meaning | Analyst Action |
 | :--- | :--- | :--- |
-| `REDOS_ATTEMPT` | Input caused the sanitizer to hang (>1,000ms). | **Critical Block.** Likely a DoS attack. |
+| `ReDoS_ATTEMPT_DETECTED` | Input caused the sanitizer to exceed the 1,000ms fail-secure latency threshold. | **Critical Block.** Likely a DoS attack; Global System Pause should activate. |
 | `TOKEN_DILUTION` | High entropy detected in a specific 35-char window. | Inspect for hidden shellcode or encoded payloads. |
 | `SYNTACTIC_PROBE` | High density of imperative constraints detected. | Check for "Ignore previous instructions" patterns. |
 | `PII_LEAK` | Redactor identified emails, keys, or SSNs. | Ensure redaction was successful; block if sensitive. |
@@ -162,7 +163,7 @@ When a prompt is intercepted or blocked, the system returns a standardized messa
 
 ## 9. Administrative Audit Trail (Compliance)
 
-To meet **ISO 27001** and other regulatory requirements, Counter-Spy.ai maintains a separate, immutable **Admin Audit Log**.
+To meet **ISO 27001** and other regulatory requirements, production deployments should maintain a separate, immutable **Admin Audit Log**. The current Beta stores review state in Firestore audit records but does not implement a separate immutable admin audit ledger.
 
 *   **Tracked Actions:** 
     *   Toggling the **Global System Pause**.

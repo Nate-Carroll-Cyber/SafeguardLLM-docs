@@ -3,14 +3,13 @@
 
 | Version | Date | Description |
 | :--- | :--- | :--- |
-| **v2.1** | 2026-04-24 | Governance terminology refresh, entropy suspicious floor update, Bulk Ingest pause handling, selected-file visibility, and reviewed-outcome FPR/FNR metrics. |
 | **v2.0** | 2026-04-21 | Promotion to Beta: stabilized local demo stack, guarded backend responder path, Lara translation modes, Sam Spade governed intake, and layered defense funnel metrics. |
 
 ---
 
 ## 1. Operational Overview
 
-Counter-Spy.ai is an **Adversary-Aware Security Gateway**. It sits between untrusted user input and Large Language Models (LLMs) to provide a deterministic security layer. Unlike traditional firewalls, it does not simply block known bad patterns — it analyzes the **intent, complexity, and randomness** of incoming traffic to identify zero-day prompt injections and model reverse-engineering attempts.
+Counter-Spy.ai is an **Adversary-Aware Security Gateway**. It sits between untrusted user input and Large Language Models (LLMs) to provide a deterministic security layer. Unlike traditional firewalls, it does not simply block known bad patterns — it analyzes the **intent, complexity, and randomness** of incoming traffic to identify zero-day prompt injections and model reverse-engineering attempts. In the current Beta, deterministic enforcement and model guidance are both present: exact policy hits remain phrase-based, while the saved firewall prompt also steers the decision model across the operator-managed forbidden categories.
 
 As an Analyst or Administrator, you are the final decision-maker in the **Human-in-the-Loop (HITL)** cycle. Your primary goal is to maintain the balance between **System Resilience** (blocking attacks) and **User Experience** (minimizing false positives).
 
@@ -31,13 +30,15 @@ Analysts should perform these tasks at the start of every shift:
 
 The **Metrics** tab is the primary interface for real-time situational awareness and your early-warning system for separating noise from targeted attacks.
 
-### 3.1 Threat Velocity & Z-Score
+### 3.1 Threat Velocity & Spike Indicators
 
 The dashboard tracks the rate of threats (Suspicious or Adversarial logs) over a rolling 24-hour window.
 
 **Threat Velocity** is expressed as a percentage change from the 24-hour baseline. A value of **+500%** indicates that current threat activity is five times higher than the recent baseline.
 
-**Z-Score** measures how many standard deviations the current threat rate is from the mean, calculated in real-time:
+**Current Beta note:** The Metrics surface provides real-time threat velocity and alert-severity visibility from audit records. The local anomaly helper currently computes a rolling spike ratio against a 24-hour hourly baseline, not a production incidenting service with PagerDuty/Slack delivery. If your deployment uses formal Z-score thresholds, calculate and alert on those in the production telemetry pipeline.
+
+**Production target:** A Z-score can measure how many standard deviations the current threat rate is from the mean:
 
 $$Z = \frac{x - \mu}{\sigma}$$
 
@@ -49,15 +50,15 @@ $$Z = \frac{x - \mu}{\sigma}$$
 
 **Alert Thresholds:**
 
-| Z-Score | Status | Required Action |
+| Indicator | Status | Required Action |
 | :--- | :--- | :--- |
-| < 1.0 | Normal | No action required. |
-| 1.0 – 3.0 | Active Interest | Monitor for repeated payloads from a single `userId`. |
-| > 2.0 | Statistically Significant | Increase monitoring cadence. |
-| > 5.0 | **Coordinated Incident** | Statistically impossible without automation. Evaluate Global System Pause. Notify Lead Architect. |
+| Low | Normal | No action required. |
+| Elevated | Active Interest | Monitor for repeated payloads from a single `userId`. |
+| Significant | Statistically Significant | Increase monitoring cadence. |
+| Critical | **Coordinated Incident** | Evaluate Global System Pause. Notify Lead Architect. |
 
 > [!IMPORTANT]
-> **Notification Escalation:** When a Z-Score exceeds **5.0**, a high-priority incident is created. In production, this triggers an automated alert to **PagerDuty** and the **#soc-alerts** Slack channel.
+> **Notification Escalation:** PagerDuty/Slack incident creation is a planned production integration, not current repo functionality. In the current Beta, operators should treat high spike indicators as a manual escalation trigger.
 
 > [!TIP]
 > Use the **Hide Simulated** toggle to filter out bulk ingest and test data, ensuring metrics reflect real-world user intent only.
@@ -77,8 +78,12 @@ $$H(X) = -\sum_{i=1}^{n} P(x_i) \log_b P(x_i)$$
 
 | Guardrail | Suspicious | Adversarial | Purpose |
 | :--- | :--- | :--- | :--- |
-| **Entropy** | 4.5 | 5.5 | Catching Base64/Hex obfuscation |
+| **Entropy** | `> 3.2` | `> configured Entropy Threshold` | Shared entropy policy used by submit-time sanitization, Audit Logs, and Metrics |
 | **Syntactic Complexity** | 50 | 90 | Catching instruction stacking |
+
+Operator note: entropy now has two roles. First, it contributes a direct verdict band: above `3.2` is `Suspicious`, and above the configured threshold is `Adversarial`. Second, it still acts as supporting concealment telemetry in Prompt Details and Metrics. Recognized obfuscation families remain adversarial by policy even when the entropy score alone would not cross the configured ceiling.
+
+Operator note: `Blocked Topics` metrics currently count normalized phrase-family hits, not a separate semantic topic classifier. If a request is semantically close to a forbidden category but does not literally match one of the configured topic phrases after supported recovery or normalization, it may still be influenced by the firewall prompt without incrementing `Topic Hits`.
 
 ---
 
@@ -89,7 +94,7 @@ $$H(X) = -\sum_{i=1}^{n} P(x_i) \log_b P(x_i)$$
 ### 4.1 Review Process
 
 1. **Identify:** Locate logs with the purple `REVIEW` status in the queue.
-2. **Inspect:** Use the **Full Prompt Inspection** dialog to view the raw, un-redacted text.
+2. **Inspect:** Use the **Full Prompt Inspection** dialog to view the persisted sanitized prompt, response, detection flags, obfuscation telemetry, and backend timing fields. Raw un-redacted prompt storage is not enabled in the current Beta.
 3. **Cross-Reference:** Check the **Session ID** to identify whether this user has had multiple previous interceptions.
 4. **Verdict:** Assign a **Resultant Severity** using the Decision Tree below.
 
@@ -129,15 +134,16 @@ graph TD
 **Global System Pause** is the platform kill switch and should be treated as a DEFCON 1 event.
 
 > [!CAUTION]
-> Activating the **Global System Pause** triggers a crimson site-wide alert and halts **100% of automated inference**. Use only during verified mass-exploitation events.
+> Activating the **Global System Pause** prevents new automated inference in the Analyst Chat path and routes subsequent prompts into `PENDING_REVIEW`. The request that triggered an automatic pause is blocked before inference; later traffic is queued until operators resume service.
 
 ### 5.1 Activation Criteria
 
 Activate the Global System Pause when **any** of the following conditions are met:
 
-1. **Z-Score > 5.0** sustained for more than 10 minutes.
+1. **Critical spike indicator** sustained for more than 10 minutes.
 2. **Canary Token Trigger:** The system detects `COUNTERSPY_CANARY_TOKEN` in a log, indicating a System Instruction breach.
 3. **Third-Party Outage:** AWS Bedrock or Gemini is experiencing a degraded state (503 errors).
+4. **Automatic ReDoS Trigger:** Sanitization latency exceeds 1,000ms, which blocks the triggering prompt, logs `ReDoS_ATTEMPT_DETECTED`, and flips `isGlobalPause` on for subsequent traffic.
 
 ### 5.2 Recovery Protocol
 
@@ -148,7 +154,7 @@ Activate the Global System Pause when **any** of the following conditions are me
 2. **Verify:** Confirm that the attack vector (e.g., a specific regex bypass) has been patched in the **Knowledge Base**.
 3. **Tune:** Adjust Entropy or Complexity thresholds to catch the pattern that triggered the pause.
 4. **Resume:** Toggle the Global System Pause to **OFF**.
-5. **Monitor:** Remain on the Metrics tab and observe the Z-Score for a minimum of 15 minutes to confirm new thresholds are holding.
+5. **Monitor:** Remain on the Metrics tab and observe threat velocity for a minimum of 15 minutes to confirm new thresholds are holding.
 
 ---
 
@@ -174,8 +180,18 @@ Only promote logs that meet at least one of the following criteria:
 
 | Flag | Severity | Technical Detail |
 | :--- | :--- | :--- |
-| `REDOS_ATTEMPT` | **Critical** | Input caused a sanitizer timeout (>1,000ms). Indicates catastrophic regex backtracking - potential DoS attempt. |
+| `ReDoS_ATTEMPT_DETECTED` | **Critical** | Sanitization latency exceeded 1,000ms. The triggering request was blocked before inference, logged as adversarial, and automatic Global System Pause was activated for subsequent traffic. |
 | `TOKEN_DILUTION` | **High** | High local entropy spike in sliding window. Obfuscated payload buried in noise text. |
 | `SYNTACTIC_PROBE` | **Medium** | Elevated density of imperative verbs (e.g., "forget," "ignore," "must"). Indicates system override attempt. |
 | `PII_LEAK` | **Variable** | Detection of SSN, email addresses, or AWS keys. Verify whether redaction succeeded before releasing. |
 | `CANARY_EXFIL` | **Critical** | Prompt or response contained the unique `COUNTERSPY_CANARY_TOKEN`. Indicates System Instruction breach — activate HOTL immediately. |
+
+## Obfuscation Posture
+
+Counter-Spy.ai currently operates as a plain-text English chatbot control plane. Under that posture:
+
+- Any recognized obfuscation signal is treated as `Adversarial`.
+- Analysts should not expect leetspeak, ROT13, symbol substitution, coordinate ciphers, recursive decode chains, or similar concealment patterns to remain merely `Suspicious`.
+- Alphabetic substitution gibberish that scores as low-English-likeness under the local trigram / bounded Caesar-shift heuristic is also treated as an obfuscation-family adversarial signal, even if it contains only letters and spaces.
+- If a prompt is already carrying a local obfuscation-family `Adversarial` verdict, the user-facing response should be a local detection banner, not `Backend Error`. Treat any backend-availability message on a clearly obfuscated prompt as a routing bug worth investigation.
+- Position-style or indexed vertical text layouts may still under-detect compared with simpler one-character-per-line vertical text. Treat those misses as detector-coverage gaps rather than as evidence that the obfuscation policy itself is disabled.

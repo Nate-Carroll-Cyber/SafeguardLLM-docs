@@ -476,7 +476,7 @@ The first integration does not need to be large.
 
 - Sam Spade message traffic uses the dedicated `/v1/ctf/sam-spade/message` route.
 - Clean turns pass through local sanitizer and the safeguard judge before reaching the downstream responder or local responder passthrough.
-- The backend assembles the Downstream Responder Prompt, Sam Spade persona prompt, and active scenario prompt before responder inference when responder routing is enabled.
+- The backend assembles Sam Spade persona and scenario prompt text before responder inference when responder routing is enabled. Browser callers cannot override backend-owned Sam Spade prompt text.
 - CTF turns with sensitive redaction signals such as `CREDIT_CARD`, `SSN`, `API_KEY`, `SECRET_KEY`, or `JWT` are intercepted before responder inference and return `Bad content.` to the CTF surface.
 - The frontend mirrors CTF review artifacts into Analyst Chat and Audit Logs without re-running responder inference.
 - Review artifacts may carry a `sam_spade_ctf` responder prompt profile plus responder provider/model/status, split latency telemetry, and local passthrough status.

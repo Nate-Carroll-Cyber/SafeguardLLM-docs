@@ -55,13 +55,13 @@ Supplementary controls that further harden the platform.
 
 | Counter‑Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
 | :--- | :--- | :--- |
-| **JWT Authorization & Endpoint Validation** | Prevents attackers from spoofing identities and flooding the API by enforcing strict per‑request validation of Bearer tokens (sub, aud, exp) and rejecting reused or malformed tokens. | **AML.TA0003**; **AML.T0012** |
+| **Shared Bearer Route Protection (Current Beta)** | Protected execution routes require the configured backend bearer credential. Production JWT/OIDC validation for `sub`, `aud`, and `exp` is a planned control, not current backend functionality. | **AML.TA0003**; **AML.T0012** |
 | **Fail‑Closed Gateway Enforcement** | Prevents fail-open behavior by refusing to forward eligible clean prompts when the safeguard judge or downstream responder cannot complete. Governance sync failures retain the current in-memory/default state rather than silently bypassing the firewall. | **AML.TA0004**; **AML.T0051** |
-| **Telemetry Anomaly Escalation** | Reduces operational DoS (alert fatigue) by mapping high Z‑Score telemetry thresholds (e.g., Z > 5.0) to automated incident escalation (PagerDuty/Slack) so the SOC is alerted to coordinated attacks exploiting borderline entropy scores. | **AML.TA0008**; **AML.T0029** |
+| **Telemetry Anomaly Escalation (Planned Production Control)** | Current Beta metrics expose threat-velocity and alert-severity signals for manual escalation. Automated PagerDuty/Slack delivery is a production integration target, not current repo functionality. | **AML.TA0008**; **AML.T0029** |
 
 ---
 
 ## Appendix — Key Operational Thresholds and Controls
 - **Entropy bands:** `Allowed <= 3.6`, `Suspicious > 3.6 and <= configured Entropy Threshold`, `Adversarial > configured Entropy Threshold`
 - **Sanitization order:** `Normalize (NFKC)` → `Strip non-printables` → `Local sanitizer/entropy/regex checks` → `OpenAI-compatible safeguard judge` → `Downstream responder` → `Output filter`
-- **Audit logging:** Dual records (escaped raw + normalized ASCII) with immutable metadata and RBAC for access
+- **Audit logging:** Current Beta audit records persist sanitized prompts, detection metadata, review state, and backend telemetry with Firestore RBAC. Dual raw/normalized records and immutable admin audit trails are planned production controls, not current repo functionality.
