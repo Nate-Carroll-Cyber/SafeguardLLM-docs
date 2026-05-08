@@ -115,6 +115,7 @@ The current audit log already captures much of what we need. For analysis, deriv
 | `batchId` | `string?` | Bulk ingest campaign grouping |
 | `backendGatewayStatus` | `enum?` | `/v1/intercept` outcome: `CLEAN`, `INTERCEPTED`, `QUEUED`, or `SHIELD_ERROR` |
 | `backendSafeguardVerdict` | `enum?` | Backend safeguard judge verdict when the prompt reached that layer |
+| `backendSafeguardReasoning` | `string?` | Safeguard judge or fail-secure reason surfaced by the backend |
 | `safeguardSchemaShape` | `enum?` | Runtime safeguard output shape: `verdict`, `decision`, or `malformed` from structured gateway logs |
 | `safeguardDivergent` | `boolean?` | True when the gateway action diverged from the expected verdict-to-action mapping |
 | `safeguardRawReasoningTrace` | `string?` | Optional provider-exposed reasoning trace lifted into structured gateway logs for security review |
@@ -122,7 +123,9 @@ The current audit log already captures much of what we need. For analysis, deriv
 | `localPrecheckLatencyMs` | `number?` | Backend deterministic precheck latency for prompts that reached `/v1/intercept` |
 | `backendSafeguardLatencyMs` | `number?` | Pure safeguard judge call latency, excluding local precheck and responder time |
 | `backendGatewayLatencyMs` | `number?` | Total backend gateway latency for the intercept request |
+| `instructionEmbeddingDurationMs` | `number?` | Backend instruction-monitor embedding duration for pgvector/Ollama requests |
 | `responderLatencyMs` | `number?` | Downstream responder latency; local responder passthrough records `0` |
+| `failSecureFlags` | `string[]?` | Derived from `SAFEGUARD_TIMEOUT`, `SAFEGUARD_ERROR`, `FAIL_SECURE`, and `ReDoS_ATTEMPT_DETECTED` flags |
 | `atlasTactic` | `string?` | Active MITRE ATLAS organizer shown in the UI |
 | `atlasTechniqueId` | `string?` | Canonical ATLAS organizer node ID |
 | `atlasTechniqueName` | `string?` | Canonical ATLAS organizer node label |
@@ -144,6 +147,8 @@ Use existing signals to propose labels:
 
 - blocked keyword hits -> instruction override
 - `OBFUSCATED_INSTRUCTION` or decode telemetry -> encoding / obfuscation
+- `BINARY_ENCODING`, `ASCII_DECIMAL`, `A1Z26`, `PIG_LATIN`, `VERTICAL_TEXT`, or recursive decode telemetry -> encoding / structural obfuscation
+- `SAFEGUARD_TIMEOUT`, `SAFEGUARD_ERROR`, or `FAIL_SECURE` -> safeguard resilience / fail-secure event
 - MCP / A2A hard-block phrases -> tool / agent exploitation
 - excessive verbosity + roleplay markers -> role-play jailbreak
 

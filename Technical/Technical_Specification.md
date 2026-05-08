@@ -13,8 +13,8 @@ Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure La
 ### 1.1 Logical Flow
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
-2.  **The Sword (Backend-Mediated Inference):** The backend gateway runs deterministic prechecks, compares clean candidates against the pgvector-backed instruction similarity monitor when enabled, calls an OpenAI-compatible safeguard judge, then forwards only `CLEAN` payloads to the downstream responder when responder routing is enabled. Safeguard runtime configuration is separate from responder runtime configuration; the Analyst Chat surface can select `LM_STUDIO` or `OPENAI` safeguard presets, and both safeguard and responder paths can use backend-managed credentials plus optional browser-local Base URL, Model ID, and memory-only API key overrides.
-    *   **Current prompt-contract note:** The safeguard judge receives one editable Safeguard Effective Prompt for inspection and forwarding decisions. That artifact is stored directly in System Configuration and includes the single backend-owned runtime JSON verdict contract, backend-owned neutral evidence contract, forbidden-category guidance, and promoted few-shot examples. System Configuration previews and hashes the exact effective prompt that is sent at runtime. The safeguard judge receives a candidate prompt after deterministic normalization/redaction plus neutral preprocessing evidence; it does not receive the local sanitizer's final verdict or reasoning. The Downstream Responder Prompt from System Configuration is sent as the responder instruction only after clean traffic clears the safeguard judge and responder routing remains enabled. When responder routing is disabled, clean safeguard verdicts return local responder passthrough instead. Legacy decision-shaped, malformed, or non-JSON safeguard outputs are treated as `SUSPICIOUS` and queued for review. Safeguard upstream calls are bounded by `SAFEGUARDS_TIMEOUT_MS` (default 30s), with browser-side `/v1/intercept` abort as a secondary 45s guard.
+2.  **The Sword (Backend-Mediated Inference):** The backend gateway runs deterministic prechecks, compares clean candidates against the pgvector-backed instruction similarity monitor when enabled, calls an OpenAI-compatible safeguard judge, then forwards only `CLEAN` payloads to the downstream responder when responder routing is enabled. Safeguard runtime configuration is separate from responder runtime configuration, and both paths use backend-managed credentials, endpoints, and backend-owned system prompts. Browser callers cannot override provider base URLs, API keys, model base URLs, or backend prompt text on protected execution paths.
+    *   **Current prompt-contract note:** The safeguard judge receives a backend-owned instruction for inspection and forwarding decisions, including the single runtime JSON verdict contract, neutral evidence contract, forbidden-category guidance, and promoted few-shot examples. System Configuration previews and hashes recommended/current safeguard prompt artifacts for review, but protected backend execution does not accept caller-supplied safeguard or responder system prompts. The safeguard judge receives a candidate prompt after deterministic normalization/redaction plus neutral preprocessing evidence; it does not receive the local sanitizer's final verdict or reasoning. Clean traffic is forwarded to the responder only after it clears the safeguard judge and responder routing remains enabled. When responder routing is disabled, clean safeguard verdicts return local responder passthrough instead. Legacy decision-shaped, malformed, or non-JSON safeguard outputs are treated as `SUSPICIOUS` and queued for review. Safeguard upstream calls are bounded by `SAFEGUARDS_TIMEOUT_MS` (default 30s), with browser-side `/v1/intercept` abort as a secondary 45s guard.
     *   **Current forbidden-category note:** Configured forbidden phrases are enforced locally and included in the Safeguard Effective Prompt, which remains the reviewable source for baseline category and gibberish guidance.
 
 ### 1.2 System Resilience & Fallback Policies
@@ -27,7 +27,7 @@ The Beta implementation adheres to a **Fail-Secure** philosophy across all criti
 | **Instruction Similarity Monitor** | Database unavailable or embedding provider failure | **Best-Effort / Hash Fallback** | Gateway logs the monitor failure and continues with deterministic prechecks plus safeguard evaluation. If embeddings fail but the database is reachable, exact/loose hash and SimHash comparison still run. |
 | **Frontend Intercept Call** | Backend route hangs beyond 45s | **Fail-Secure** | Browser aborts `/v1/intercept`, records timeout fail-secure telemetry, activates Global System Pause, and does not run local fallback inference. |
 | **Governance Sync** | Database Connection Loss | **Best-Effort Sync** | The app keeps its current in-memory/default governance state. It does not automatically force `isGlobalPause: true` on startup or sync failure. |
-| **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | If sanitization latency exceeds 1,000ms, the triggering request is blocked before inference, logged as `Adversarial` with `ReDoS_ATTEMPT_DETECTED`, and automatic Global System Pause is activated for subsequent traffic. |
+| **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | If sanitization latency exceeds 1,000ms, the triggering request is blocked before inference, logged as `Adversarial` with `ReDoS_ATTEMPT_DETECTED`, and the backend returns `governanceAction: "GLOBAL_PAUSE"` so the frontend activates Global System Pause for subsequent traffic. |
 
 ---
 
@@ -96,7 +96,7 @@ The governance state is persisted in Firestore (`config/governance`).
 ### 4.1 Anti-ReDoS Circuit Breaker
 *   **Logic:** Every `sanitizeInput` execution is wrapped in a high-resolution timing block (`performance.now()`).
 *   **Threshold:** 1,000ms.
-*   **Policy:** Any sanitization pass completing above 1,000ms is treated as a potential ReDoS event. The triggering request is blocked before inference, logged as `Adversarial` with the `ReDoS_ATTEMPT_DETECTED` flag, and contributes to both the `ReDoS Trips` resilience metric and the Defense Funnel's pre-inference blocked count.
+*   **Policy:** Any sanitization pass completing above 1,000ms is treated as a potential ReDoS event. The triggering request is blocked before inference, logged as `Adversarial` with the `ReDoS_ATTEMPT_DETECTED` flag, returns `governanceAction: "GLOBAL_PAUSE"` from `/v1/intercept`, and contributes to both the `ReDoS Trips` resilience metric and the Defense Funnel's pre-inference blocked count.
 
 ---
 
@@ -110,7 +110,7 @@ External services must authenticate with the Counter-Spy gateway using **Bearer 
     *   **Claims:** Validation requires `sub` (subject), `aud` (audience), and `exp` (expiration).
     *   **Policy:** Tokens are validated per-request; no local caching of validation state is performed in the Beta to ensure immediate revocation propagation.
     *   **TTL:** Token lifespan and refresh cycles are governed by the Identity Provider's policy.
-*   **Current Beta Note:** In dev, the backend can run without a bearer token. Outside dev, `INTERCEPT_BEARER_TOKEN` can be required before the gateway serves `/v1/intercept`.
+*   **Current Beta Note:** Protected execution routes require the shared backend bearer token when they are called. `INTERCEPT_BEARER_TOKEN` configures the backend-side credential, and browser gateway clients send the matching `VITE_BACKEND_BEARER_TOKEN` value with `/v1/intercept`, `/v1/translate`, `/v1/instruction-monitor/reviewed-adversarial`, and `/v1/ctf/sam-spade/*` requests.
 *   **Future Support:** Integration with **AWS IAM SigV4** is planned for service-to-service communication within VPC environments.
 
 ### 5.2 Endpoint Specification
@@ -122,9 +122,11 @@ External services must authenticate with the Counter-Spy gateway using **Bearer 
 | `prompt` | `string` | The raw input string to be sanitized. |
 | `userId` | `string` | The unique identifier for the requesting user. |
 | `sessionId` | `string` | The identifier for the current interaction session. |
-| `metadata` | `object` | Optional key-value pairs, including browser-local safeguard Base URL, safeguard Model ID, memory-only safeguard API key override, `providerLlmRoutingEnabled` for direct/API local-only callers, `responderLlmRoutingEnabled`, responder provider, responder Base URL, responder Model ID, memory-only responder API key override, the active downstream responder prompt, and Sam Spade responder persona/scenario prompts for `ctf_chat` traffic. |
+| `metadata` | `object` | Strict allowlist only: `localReviewMode`, `source`, `providerLlmRoutingEnabled`, `responderLlmRoutingEnabled`, optional browser-memory `safeguardApiKey`, and optional instruction-monitor embedding fields. Browser callers cannot choose backend provider endpoints, model base URLs, or backend-owned system prompts. |
 
-When the instruction monitor is enabled, API callers may provide `metadata.instructionEmbedding` and `metadata.instructionChunks` with precomputed vectors. Normal frontend submissions can omit these values; the backend generates whole-prompt and chunk embeddings when `INSTRUCTION_MONITOR_EMBEDDINGS_*` or compatible fallback provider settings are available.
+Protected execution routes require the backend bearer credential before work begins: `/v1/intercept`, `/v1/translate`, `/v1/instruction-monitor/reviewed-adversarial`, and all `/v1/ctf/sam-spade/*` routes. Sam Spade routes also require the caller id header used by the frontend gateway client; created sessions are stored with that owner id, and fetch/message/solve operations reject cross-owner access. Translation is routed only through backend-managed Lara environment configuration and fails closed when Lara credentials are absent.
+
+When the instruction monitor is enabled, API callers may provide `metadata.instructionEmbedding` and `metadata.instructionChunks` with precomputed vectors. Normal frontend submissions can omit these values; the backend generates whole-prompt and chunk embeddings only when `INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL` points at a local/private-network OpenAI-compatible embeddings endpoint. It does not infer embeddings from `SAFEGUARDS_API_BASE_URL`, so LM Studio safeguard endpoints are never probed as embedding endpoints. Public hosted embedding endpoints are blocked for this path so malicious prompt material is not sent to third-party embedding APIs. Embeddings do not inherit the generic responder, safeguard, or OpenAI LLM endpoint.
 
 **Safeguard Judge Input Contract:**
 
@@ -167,22 +169,32 @@ The frontend carries structured backend outcome data from `/v1/intercept` into A
 | `localPrecheckLatencyMs` | Backend deterministic precheck latency in milliseconds. |
 | `backendSafeguardLatencyMs` | Pure Safeguard LLM call latency in milliseconds. |
 | `backendGatewayLatencyMs` | Total `/v1/intercept` gateway latency in milliseconds. |
+| `instructionEmbeddingDurationMs` | Instruction-monitor embedding request duration in milliseconds when the backend generated whole-prompt/chunk embeddings. |
 | `responderLatencyMs` | Downstream responder latency in milliseconds; local passthrough records `0`. |
 
-These fields prevent model/safeguard interventions from being misclassified as local sanitizer results and keep safeguard latency distinct from local responder passthrough latency. They are especially important for Bulk Ingest prompts that appear in Analyst Chat but are blocked by the backend safeguard judge after local sanitizer redaction.
+These fields prevent model/safeguard interventions from being misclassified as local sanitizer results and keep safeguard latency distinct from local responder passthrough latency. They are especially important for Bulk Ingest prompts that appear in Analyst Chat but are blocked by the backend safeguard judge after local sanitizer redaction. The Metrics latency profile also summarizes embedding average, P95, and sample count from `instructionEmbeddingDurationMs` when pgvector/Ollama timings are available.
+
+Sensitive-value redaction includes bare LLM provider API keys under the `LLM_API_KEY` label. The detector covers `sk_`, `sk-`, `sk-proj-`, and `sk-svcacct-` key forms even when they appear without an `api_key =` assignment prefix. Backend sanitization treats `LLM_API_KEY` as high-risk secret material and fails closed to `ADVERSARIAL`; frontend/local review redacts the same forms before audit display.
+
+When the backend instruction monitor returns a medium- or high-risk result, the frontend also persists an `instructionSimilarity` object on the audit record. That object records `highestRisk`, `matchCount`, and the strongest `topMatch`, including the stored `targetHash`, `targetVerdict`, `matchReasons`, and available similarity details. Semantic details include `cosineSimilarity`, `maxChunkSimilarity`, `attentionPooledChunkSimilarity`, and `sandwichDelta`. Fingerprint-only matches, embedding failures, or runs without available embeddings still preserve hash and SimHash evidence, but semantic score fields remain `null` or absent.
 
 ### 5.4 Safeguard Schema and Divergence Observability
 Every safeguard decision emits structured JSON logs for metric extraction:
 *   `metric_increment` with `metric: "safeguard.schema"` and tag `shape` equal to `verdict`, `decision`, or `malformed`.
 *   `metric_increment` with `metric: "safeguard.divergence"` and tags `judgeVerdict`, `gatewayAction`, and `divergent`.
 *   `safeguard_decision` with prompt hash, retry marker, response shape, judge verdict, gateway action, divergence boolean, optional raw reasoning trace when exposed by the provider, and safeguard latency.
+*   `instruction_embedding_generated` with embedding model, runtime source, input count, vector dimensions, chunk count, and duration for pgvector/Ollama embedding requests.
 
 The expected mapping is `CLEAN -> CLEAN`, `SUSPICIOUS -> QUEUED`, and `ADVERSARIAL -> INTERCEPTED`. Any non-zero divergence on suspicious or adversarial traffic indicates orchestration-vs-judge drift and should be treated as a correctness issue.
 
 ### 5.5 Instruction Similarity Monitor
 The v2.2 backend instruction monitor stores observed instruction fingerprints in PostgreSQL with pgvector. Each record includes strict SHA-256, loose stopword-stripped SHA-256, 2/3/4-gram SimHash values, optional whole-prompt embedding, and optional overlapping chunk embeddings.
 
-The monitor compares exact/loose hashes, SimHash Hamming distance, whole-prompt ANN similarity, and chunk-level ANN similarity. Chunk ANN queries are concurrency-capped to protect the database pool. Deterministic fingerprint reuse of previously adversarial instructions is treated as adversarial and blocked; semantic overlap is treated as suspicious and routed to analyst review. The Docker demo uses `pgvector/pgvector:pg16` with tmpfs-backed Postgres data, so recreating the Postgres container starts the instruction-memory database clean.
+The monitor compares exact/loose hashes, SimHash Hamming distance, whole-prompt ANN similarity, and chunk-level ANN similarity. Chunk ANN queries are concurrency-capped to protect the database pool. Deterministic fingerprint reuse of previously adversarial instructions is treated as adversarial and blocked; semantic overlap is treated as suspicious and routed to analyst review. The Docker demo uses `pgvector/pgvector:pg16` with PostgreSQL extension `vector` version `0.8.2` observed in the rebuilt demo database. Its Postgres data directory is tmpfs-backed, so recreating the Postgres container starts the instruction-memory database clean.
+
+The pgvector corpus is intentionally limited to reviewed `ADVERSARIAL` examples. "Reviewed" means an analyst has clicked through the review workflow and the resulting severity/rating is `Adversarial`; there is no separate approval state. Runtime comparison can evaluate any candidate against the corpus, but new records are not inserted unless they are explicitly marked reviewed with an adversarial verdict. Seed imports enforce the same rule: any `core` seed record that is not reviewed and adversarial fails validation before database writes begin.
+
+The `core` seed pack lives at `seeds/pgvector/core.json` and imports with `npm run instruction-monitor:seed:core`. Seed rows share the normal `instruction_records` and `instruction_chunks` tables, with explicit metadata columns: `seed_pack`, `seed_version`, `seed_record_hash`, `seed_snapshot_hash`, `seed_immutable`, `seed_imported_at`, and `seed_source`. Seed imports are idempotent. Matching hashes are skipped; changed immutable seed rows fail closed unless the operator uses an explicit migration/update flag.
 
 **Match Reason Criteria:**
 | UI reason | Criteria | Default threshold |

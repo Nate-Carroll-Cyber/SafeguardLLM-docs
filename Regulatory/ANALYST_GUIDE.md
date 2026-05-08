@@ -5,6 +5,7 @@
 | v2.0 | 2026-04-21 | Promotion to Beta: stabilized local demo stack, guarded backend responder path, Lara translation modes, Sam Spade governed intake, and layered defense funnel metrics. |
 | v2.1 | 2026-04-25 | Runtime sync: backend safeguard attribution is now structured in audit/metrics records, and blocked Sam Spade CTF content is masked as `Bad content.` on gameplay surfaces. |
 | v2.2 | 2026-05-07 | Instruction similarity monitor: backend pgvector memory now detects exact, loose-hash, SimHash, and semantic prompt matches before responder forwarding. Adversarial fingerprint reuse blocks; semantic overlap routes to suspicious review. The local demo database is clean on Postgres container recreation. |
+| v2.3 | 2026-05-08 | Security remediation: protected execution routes now require backend bearer auth, browser-supplied backend runtime overrides are rejected, Lara translation is backend-configured only, Sam Spade sessions are owner-scoped, and Firestore audit-log creates have a tighter allowlist. |
 
 ---
 
@@ -137,7 +138,7 @@ Not every flagged log is suitable for the Golden Set. To ensure high-quality tra
 
 | Flag | Meaning | Analyst Action |
 | :--- | :--- | :--- |
-| `REDOS_ATTEMPT` | Input caused the sanitizer to hang (>1,000ms). | **Critical Block.** Likely a DoS attack. |
+| `ReDoS_ATTEMPT_DETECTED` | Input caused the sanitizer to exceed the 1,000ms fail-secure latency threshold. | **Critical Block.** Likely a DoS attack; Global System Pause should activate. |
 | `TOKEN_DILUTION` | High entropy detected in a specific 35-char window. | Inspect for hidden shellcode or encoded payloads. |
 | `SYNTACTIC_PROBE` | High density of imperative constraints detected. | Check for "Ignore previous instructions" patterns. |
 | `PII_LEAK` | Redactor identified emails, keys, or SSNs. | Ensure redaction was successful; block if sensitive. |
