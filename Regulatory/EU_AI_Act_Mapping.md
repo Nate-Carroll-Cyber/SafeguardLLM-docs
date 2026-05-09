@@ -10,7 +10,7 @@ If an enterprise deploys an LLM or downstream responder API without an intermedi
 
 #### **1. Article 14: Human Oversight**
 *The EU AI Act mandates that high-risk AI systems must be designed in a way that allows them to be effectively overseen by natural persons, including the ability to intervene, disregard, or completely halt the system.*
-* **Human-in-the-Loop (HITL) Mode:** Counter-Spy automatically intercepts borderline traffic, including prompts above the suspicious entropy floor of `3.6` but not above the configured adversarial cutoff, and routes it to a `PENDING_REVIEW` queue, fulfilling the mandate that humans must be able to review and intervene before an automated action executes.
+* **Human-in-the-Loop (HITL) Mode:** Counter-Spy automatically intercepts borderline traffic, including prompts above the suspicious entropy floor of `3.8` but not above the configured adversarial cutoff, and routes it to a `PENDING_REVIEW` queue, fulfilling the mandate that humans must be able to review and intervene before an automated action executes.
 * **Global System Pause (DEFCON 1):** The Act specifically requires a "stop button" or equivalent mechanism to safely halt operations. Counter-Spy’s DEFCON 1 toggle halts automated forwarding, routes new Analyst Chat prompts to manual review during an attack, and stops active Bulk Ingest replay.
 * **Analyst Review Workflow:** Allows authorized personnel to override the system, update the `resultantSeverity` of logs, and actively manage the AI's boundaries.
 

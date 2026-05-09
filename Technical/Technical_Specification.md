@@ -1,6 +1,6 @@
 # Technical Reference & Architecture Specification: Counter-Spy.ai
 
-**Version:** v2.2
+**Version:** v2.3
 **Status:** Beta / Promotion to Beta  
 **Classification:** Proprietary / AppSec Engineering  
 
@@ -46,8 +46,8 @@ To catch alphabetic substitution gibberish that still resembles plain prose, the
 
 ### 2.1.2 Entropy Policy Bands
 The current Beta uses one shared entropy policy across the submit-time firewall, Audit Logs, and Metrics.
-*   **Allowed:** prompt entropy `<= 3.6`
-*   **Suspicious:** prompt entropy `> 3.6` and `<= configured Entropy Threshold`
+*   **Allowed:** prompt entropy `<= 3.8`
+*   **Suspicious:** prompt entropy `> 3.8` and `<= configured Entropy Threshold`
 *   **Adversarial:** prompt entropy `> configured Entropy Threshold`
 *   **Operator Meaning:** the governance slider now sets the maximum approved entropy before a prompt becomes adversarial; it no longer acts as the suspicious floor.
 
@@ -173,7 +173,7 @@ These fields prevent model/safeguard interventions from being misclassified as l
 
 Sensitive-value redaction includes bare LLM provider API keys under the `LLM_API_KEY` label. The detector covers `sk_`, `sk-`, `sk-proj-`, and `sk-svcacct-` key forms even when they appear without an `api_key =` assignment prefix. Backend sanitization treats `LLM_API_KEY` as high-risk secret material and fails closed to `ADVERSARIAL`; frontend/local review redacts the same forms before audit display.
 
-When the backend instruction monitor returns a medium- or high-risk result, the frontend also persists an `instructionSimilarity` object on the audit record. That object records `highestRisk`, `matchCount`, and the strongest `topMatch`, including the stored `targetHash`, `targetVerdict`, `matchReasons`, and available similarity details. Semantic details include `cosineSimilarity`, `maxChunkSimilarity`, `attentionPooledChunkSimilarity`, and `sandwichDelta`. Fingerprint-only matches, embedding failures, or runs without available embeddings still preserve hash and SimHash evidence, but semantic score fields remain `null` or absent.
+When the backend instruction monitor returns a medium- or high-risk result, the frontend also persists an `instructionSimilarity` object on the audit record. That object records `highestRisk`, `matchCount`, and the strongest `topMatch`, including `targetId`, the stored `targetHash`, `targetVerdict`, `matchReasons`, and available similarity details. Semantic details include `cosineSimilarity`, `maxChunkSimilarity`, `attentionPooledChunkSimilarity`, and `sandwichDelta`. Fingerprint-only matches, embedding failures, or runs without available embeddings still preserve hash and SimHash evidence, but semantic score fields remain `null` or absent. Prompt Details renders this persisted Similarity Monitor evidence, so the match context remains accessible after the transient Last Execution Results rail is replaced by a later prompt. The stored hash also has a `Lookup` action that resolves `targetId` through the protected `/v1/instruction-monitor/records/:identifier` endpoint and opens a read-only `Instruction Match` modal with source, verdict, strict/loose hashes, flags, labels, stored prompt preview, and stored chunks.
 
 ### 5.4 Safeguard Schema and Divergence Observability
 Every safeguard decision emits structured JSON logs for metric extraction:
@@ -185,11 +185,13 @@ Every safeguard decision emits structured JSON logs for metric extraction:
 The expected mapping is `CLEAN -> CLEAN`, `SUSPICIOUS -> QUEUED`, and `ADVERSARIAL -> INTERCEPTED`. Any non-zero divergence on suspicious or adversarial traffic indicates orchestration-vs-judge drift and should be treated as a correctness issue.
 
 ### 5.5 Instruction Similarity Monitor
-The v2.2 backend instruction monitor stores observed instruction fingerprints in PostgreSQL with pgvector. Each record includes strict SHA-256, loose stopword-stripped SHA-256, 2/3/4-gram SimHash values, optional whole-prompt embedding, and optional overlapping chunk embeddings.
+The v2.3 backend instruction monitor stores observed instruction fingerprints in PostgreSQL with pgvector. Each record includes strict SHA-256, loose stopword-stripped SHA-256, 2/3/4-gram SimHash values, optional whole-prompt embedding, and optional overlapping chunk embeddings.
 
 The monitor compares exact/loose hashes, SimHash Hamming distance, whole-prompt ANN similarity, and chunk-level ANN similarity. Chunk ANN queries are concurrency-capped to protect the database pool. Deterministic fingerprint reuse of previously adversarial instructions is treated as adversarial and blocked; semantic overlap is treated as suspicious and routed to analyst review. The Docker demo uses `pgvector/pgvector:pg16` with PostgreSQL extension `vector` version `0.8.2` observed in the rebuilt demo database. Its Postgres data directory is tmpfs-backed, so recreating the Postgres container starts the instruction-memory database clean.
 
 The pgvector corpus is intentionally limited to reviewed `ADVERSARIAL` examples. "Reviewed" means an analyst has clicked through the review workflow and the resulting severity/rating is `Adversarial`; there is no separate approval state. Runtime comparison can evaluate any candidate against the corpus, but new records are not inserted unless they are explicitly marked reviewed with an adversarial verdict. Seed imports enforce the same rule: any `core` seed record that is not reviewed and adversarial fails validation before database writes begin.
+
+The Analyst Chat Active Guardrails list includes a `Similarity Monitor` switch. When disabled, the frontend sends `metadata.instructionSimilarityEnabled = false` to `/v1/intercept`; the backend skips `evaluateInstructionSimilarity()` for that request and returns the normal deterministic/safeguard result without pgvector evidence. This is an execution control, not a display-only filter.
 
 The `core` seed pack lives at `seeds/pgvector/core.json` and imports with `npm run instruction-monitor:seed:core`. Seed rows share the normal `instruction_records` and `instruction_chunks` tables, with explicit metadata columns: `seed_pack`, `seed_version`, `seed_record_hash`, `seed_snapshot_hash`, `seed_immutable`, `seed_imported_at`, and `seed_source`. Seed imports are idempotent. Matching hashes are skipped; changed immutable seed rows fail closed unless the operator uses an explicit migration/update flag.
 
@@ -220,6 +222,7 @@ The `source` field preserves provenance without hiding traffic from the primary 
 The platform utilizes a real-time anomaly detection engine to monitor threat velocity.
 *   **Current Baseline:** Tracks recent audit activity against a rolling 24-hour hourly baseline for threat-velocity and dashboard context.
 *   **Current Beta Spike Metric:** The Metrics surface reports threat velocity and alert severity from the current audit stream. The standalone anomaly helper currently calculates a rolling spike ratio against the 24-hour hourly baseline rather than a production incidenting Z-score service.
+*   **Review Workload Rollup:** Metrics preserves the stored audit `detectionLevel`, but dashboard workload views treat unreviewed `Suspicious` outcomes as `Review`. This means the Alert Severity `Review` bucket, 24-hour severity trend, and HITL Queue `Pending Review` count include borderline suspicious traffic even when the raw audit record remains `Suspicious`.
 *   **Planned Production Control:** A production deployment should add a true Z-score or equivalent statistical detector in the telemetry pipeline if formal Z-score thresholds are used operationally.
 *   **Alerting Thresholds:** 
     *   **Elevated spike indicator**: Treat as anomalous activity and increase monitoring cadence.

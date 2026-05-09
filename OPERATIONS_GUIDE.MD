@@ -38,6 +38,8 @@ The dashboard tracks the rate of threats (Suspicious or Adversarial logs) over a
 
 **Current Beta note:** The Metrics surface provides real-time threat velocity and alert-severity visibility from audit records. The local anomaly helper currently computes a rolling spike ratio against a 24-hour hourly baseline, not a production incidenting service with PagerDuty/Slack delivery. If your deployment uses formal Z-score thresholds, calculate and alert on those in the production telemetry pipeline.
 
+Operational review note: Metrics keeps audit details faithful to the underlying severity, but it counts unreviewed `Suspicious` outcomes as `Review` for workload reporting. The HITL Queue `Pending Review` total therefore includes suspicious borderline traffic that still needs analyst attention.
+
 **Production target:** A Z-score can measure how many standard deviations the current threat rate is from the mean:
 
 $$Z = \frac{x - \mu}{\sigma}$$
