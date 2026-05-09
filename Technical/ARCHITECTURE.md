@@ -1,6 +1,6 @@
 # Technical Reference & Architecture Specification: Counter-Spy.ai
 
-**Version:** v2.2
+**Version:** v2.3
 **Status:** Beta / Promotion to Beta  
 **Classification:** Proprietary / AppSec Engineering  
 
@@ -195,7 +195,7 @@ These fields are the source of truth for Defense Funnel attribution and runtime 
 
 Sensitive-value redaction includes bare LLM provider API keys as `LLM_API_KEY`. The shared backend/frontend sanitizer copies redact `sk_`, `sk-`, `sk-proj-`, and `sk-svcacct-` forms even without an assignment prefix. The backend treats this label as high-risk secret material and routes the prompt to `ADVERSARIAL`; the UI and metrics count it with the other secret-disclosure signals.
 
-Instruction-monitor details are persisted with audit records as `instructionSimilarity` when the backend reports a medium- or high-risk match. The persisted summary includes `highestRisk`, `matchCount`, and the strongest `topMatch` with `targetHash`, `targetVerdict`, `matchReasons`, and available similarity scores. Semantic scores are stored as `cosineSimilarity`, `maxChunkSimilarity`, `attentionPooledChunkSimilarity`, and `sandwichDelta` when embeddings/chunks are available. The backend also records `instructionEmbeddingDurationMs` when it generates whole-prompt/chunk embeddings for `/v1/intercept` or reviewed-adversarial ingest, allowing the Metrics view to report embedding latency separately from gateway/safeguard/responder latency. Fingerprint-only matches and embedding-unavailable paths continue to log hash and SimHash evidence while leaving semantic score fields `null` or absent.
+Instruction-monitor details are persisted with audit records as `instructionSimilarity` when the backend reports a medium- or high-risk match. The persisted summary includes `highestRisk`, `matchCount`, and the strongest `topMatch` with `targetId`, `targetHash`, `targetVerdict`, `matchReasons`, and available similarity scores. Semantic scores are stored as `cosineSimilarity`, `maxChunkSimilarity`, `attentionPooledChunkSimilarity`, and `sandwichDelta` when embeddings/chunks are available. The backend also records `instructionEmbeddingDurationMs` when it generates whole-prompt/chunk embeddings for `/v1/intercept` or reviewed-adversarial ingest, allowing the Metrics view to report embedding latency separately from gateway/safeguard/responder latency. Fingerprint-only matches and embedding-unavailable paths continue to log hash and SimHash evidence while leaving semantic score fields `null` or absent. The Analyst Chat side rail is a transient last-run preview; the Prompt Details modal renders the persisted `instructionSimilarity` object so Similarity Monitor evidence remains available after later executions. Analysts can click `Lookup` on a stored hash to call `/v1/instruction-monitor/records/:identifier` by `targetId` and inspect the stored instruction record in a read-only modal.
 
 ### 5.4 Safeguard Schema and Divergence Observability
 Every safeguard decision emits structured JSON logs for metric extraction:
@@ -207,11 +207,13 @@ Every safeguard decision emits structured JSON logs for metric extraction:
 The expected mapping is `CLEAN -> CLEAN`, `SUSPICIOUS -> QUEUED`, and `ADVERSARIAL -> INTERCEPTED`. Any non-zero divergence on adversarial or suspicious traffic indicates the orchestration layer is overriding the judge and should be investigated as a correctness issue.
 
 ### 5.5 Instruction Similarity Monitor
-The v2.2 backend instruction monitor stores observed prompt fingerprints in PostgreSQL with pgvector. Each record includes strict SHA-256, loose stopword-stripped SHA-256, 2/3/4-gram SimHash values, an optional whole-prompt embedding, and optional overlapping chunk embeddings with heuristic instruction-intent scores.
+The v2.3 backend instruction monitor stores observed prompt fingerprints in PostgreSQL with pgvector. Each record includes strict SHA-256, loose stopword-stripped SHA-256, 2/3/4-gram SimHash values, an optional whole-prompt embedding, and optional overlapping chunk embeddings with heuristic instruction-intent scores.
 
 `compare()` uses separate query paths for exact/loose hash lookup, SimHash Hamming distance, whole-prompt ANN search, and chunk ANN search. Chunk ANN work is concurrency-capped so long documents do not overwhelm the database pool. Results merge by stored instruction id, and classification preserves signal intent: adversarial fingerprint reuse blocks, while semantic overlap queues for review. `observe()` is transactional and idempotent: duplicate instruction ids do not attach new chunks to an old parent record.
 
 The pgvector corpus only stores reviewed `ADVERSARIAL` records. Reviewed means the analyst review button/workflow has assigned the final severity/rating as `Adversarial`; there is no separate approval field. Runtime prompts can be compared against the corpus, but the database observe path refuses to persist clean, suspicious, or unreviewed entries. The `core` seed snapshot uses the same tables as runtime records with explicit seed metadata, allowing one lookup corpus while keeping import provenance, immutability, drift detection, and policy separation visible in row metadata.
+
+The frontend can disable runtime comparison per request with `metadata.instructionSimilarityEnabled = false`, exposed as the admin `Similarity Monitor` toggle under Active Guardrails. The backend honors that flag before generating embeddings or querying pgvector, while leaving the rest of `/v1/intercept` intact.
 
 The UI surfaces match reasons directly from the backend comparison result. `Exact Sha256` and `Loose Sha256` are equality checks against strict and stopword-stripped hashes. `Simhash 2gram`, `Simhash 3gram`, and `Simhash 4gram` fire when the corresponding 64-bit SimHash Hamming distance is at or below the configured threshold (`12` by default). `Embedding` and `Chunk Embedding` require whole-prompt or overlapping-chunk cosine similarity at or above the semantic threshold (`0.78` by default). `Attention Pool` uses instruction-intent-weighted chunk similarity (`> 0.70` risk threshold), and `Sandwich Delta` identifies a high-similarity chunk hidden inside a lower-similarity whole prompt (`> 0.20` delta with chunk similarity above `0.72`).
 
