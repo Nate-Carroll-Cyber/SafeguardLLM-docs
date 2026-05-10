@@ -27,7 +27,7 @@ The safeguard path expects one structured JSON verdict contract: `{"verdict":"CL
 
 The instruction similarity monitor runs before responder forwarding. Exact SHA-256, loose SHA-256, and SimHash matches against stored adversarial instructions retain `ADVERSARIAL` severity and block. Semantic whole-prompt or chunk-embedding matches are `SUSPICIOUS` review evidence rather than automatic adversarial blocks.
 
-The Safeguard Effective Prompt is the reviewable policy baseline, including forbidden-category, gibberish/obfuscation guidance, and promoted few-shot examples. System Configuration previews, edits, and hashes that exact effective prompt.
+The Safeguard Effective Prompt is the reviewable policy baseline, including forbidden-category, gibberish/obfuscation guidance, and promoted few-shot examples. System Configuration previews, edits, and hashes that exact effective prompt. The current promoted recommended baseline hash and aligned current safeguard prompt hash are `78b54175e27126f42ae7f4204619170fd98a5422c5e77929e7822563ca8f9214`.
 
 Audit and Metrics preserve backend safeguard attribution through `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, `backendReachedSafeguard`, `localPrecheckLatencyMs`, `backendSafeguardLatencyMs`, `backendGatewayLatencyMs`, and `responderLatencyMs`. These fields distinguish local pre-inference blocks from backend safeguard/model interventions and keep safeguard latency separate from local responder passthrough latency.
 
@@ -42,7 +42,7 @@ Global System Pause halts automated forwarding, routes new Analyst Chat prompts 
 For compliance review, maintain the following alongside this card:
 
 - Provider model cards for the active safeguard judge and downstream responder.
-- Current System Configuration hash and recommended baseline hash.
+- Current System Configuration hash and recommended baseline hash: `78b54175e27126f42ae7f4204619170fd98a5422c5e77929e7822563ca8f9214`.
 - Active environment variable inventory for backend-managed credentials.
 - Audit retention policy for Firestore and any provider-side logs.
 - Known limitations, including local-review/demo behavior and the need to validate active provider model cards for the configured safeguard judge and responder.
