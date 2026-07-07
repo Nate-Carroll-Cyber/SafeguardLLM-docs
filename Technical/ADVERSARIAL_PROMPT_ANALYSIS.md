@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document defines a practical research plan for turning Counter-Spy.ai prompt traffic into defensive insights without redistributing harmful material irresponsibly.
+This document defines a practical research plan for turning Safeguard LLM prompt traffic into defensive insights without redistributing harmful material irresponsibly.
 
 The goal is not just to store prompts, but to:
 

@@ -1,7 +1,7 @@
 ## 🗂️ Repository Structure
 
 ```
-counter-spy.ai/
+safeguard-llm/
 │
 ├── 📚 Technical/                         # Engineering & implementation documentation
 │   ├── ADVERSARIAL_PROMPT_ANALYSIS.md    # Research and evaluation plan
@@ -45,23 +45,51 @@ counter-spy.ai/
 │   │
 │   ├── 🧠 lib/                           # Core Logic & Security Engines
 │   │   ├── anomalyDetector.ts            # Statistical engine (Z-Score, rolling baselines)
-│   │   ├── firebase.ts                   # Firestore & Auth initialization
+│   │   ├── atlasTaxonomy.ts              # Active MITRE ATLAS organizer taxonomy
 │   │   ├── backendApi.ts                 # Backend gateway client for intercept, responder, CTF, translation, and governed 403 result handling
+│   │   ├── firebase.ts                   # Firestore & Auth initialization
 │   │   ├── gemini.ts                     # Legacy deterministic fallback helpers retained for local/demo paths
+│   │   ├── languageLikelihood.ts         # English-likeness and trigram scoring helpers
 │   │   ├── metrics.ts                    # Telemetry aggregation & filtering logic
+│   │   ├── obfuscation.ts                # Playground obfuscation generation utilities
 │   │   ├── playgroundMetrics.ts          # Browser-local Playground/Bulk metric records, including backend safeguard attribution fields
 │   │   ├── policies.ts                   # Knowledge Base (MITRE ATLAS, System Config)
+│   │   ├── promptFeatureVector.ts        # Feature Pressure vector calculations
 │   │   ├── sanitizer.ts                  # 🛡️  Shield — PII, entropy, regex, forbidden phrase & ReDoS engine
 │   │   ├── sanitizerLanguage.ts          # Local language/translation policy helpers
 │   │   ├── sanitizerNormalization.ts     # Shared normalization and canonicalization helpers
 │   │   ├── sanitizerObfuscation.ts       # Obfuscation-family detection helpers
+│   │   ├── spellNormalize.ts             # Browser-local spelling recovery helpers
 │   │   ├── syntacticAnalyzer.ts          # Heuristic complexity scoring logic
+│   │   ├── translate.ts                  # Translation-mode schemas and helpers
 │   │   └── utils.ts                      # Tailwind merging & shared helpers
 │   │
 │   ├── App.tsx                           # Application shell & state orchestration
 │   ├── index.css                         # Global styles & Tailwind CSS 4 configuration
 │   └── main.tsx                          # React entry point
 │
+├── 🖥️ backend/                           # Authenticated backend gateway and local services
+│   ├── Dockerfile                         # Backend container image
+│   ├── docker-entrypoint.sh               # Container entrypoint and volume ownership repair
+│   ├── src/
+│   │   ├── server.ts                      # `/v1/intercept`, translation, instruction-monitor, and CTF routes
+│   │   ├── security/sanitizer.ts          # Backend sanitizer re-export/boundary
+│   │   └── services/
+│   │       ├── instruction-monitor/       # pgvector instruction similarity monitor and seed tooling
+│   │       └── sam-spade/                 # Sam Spade session, SQLite store, and gameplay service
+│   └── test/                              # Backend route and service tests
+│
+├── 🧪 seeds/pgvector/                     # Instruction similarity seed corpus snapshots
+│   ├── core.json                          # Current core seed snapshot
+│   └── core-2026-05-10-latest.json        # Archived latest seed snapshot
+│
+├── ☁️ infra/cloudformation/               # AWS deployment templates and helper scripts
+│   ├── dev/                               # Dev network, auth, frontend, backend, data, and security stacks
+│   └── scripts/                           # Backend/frontend deployment helpers
+│
+├── docker-compose.demo.yml                # Full local demo stack: frontend, backend, pgvector
+├── docker-compose.sam-spade.yml           # Future Sam Spade service-boundary compose stub
+├── Dockerfile.frontend-demo               # Frontend demo container
 ├── .env.example                          # Template for required environment variables
 ├── .gitignore                            # Version control exclusion rules
 ├── components.json                       # Shadcn UI configuration

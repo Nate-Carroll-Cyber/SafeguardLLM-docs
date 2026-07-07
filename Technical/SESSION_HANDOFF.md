@@ -8,17 +8,39 @@ This page captures the current implementation state so a future Codex session ca
   - Frontend: `http://localhost:3000`
   - Backend health: `http://127.0.0.1:18080/healthz`
   - pgvector Postgres: `127.0.0.1:15432`
-  - Rebuild command: `docker compose --env-file /Users/nate/Documents/Counter-Spy.ai/.env.demo.local -f /Users/nate/Documents/Counter-Spy.ai/docker-compose.demo.yml up --build -d`
+  - Rebuild command: `docker compose --env-file /Users/nate/Documents/Safeguard LLM/.env.demo.local -f /Users/nate/Documents/Safeguard LLM/docker-compose.demo.yml up --build -d`
 - The instruction similarity monitor is enabled in the demo backend and uses `counter-spy-postgres`. The Postgres data directory is tmpfs-backed, initialized with SCRAM authentication and data checksums, so recreating the container starts with a clean instruction database. Sam Spade SQLite data still persists in its named Docker volume.
 - The demo embedding sidecar is Ollama on the LM Studio Mac: `http://192.168.0.183:11434/v1`, model `nomic-embed-text`, `768` dimensions, max 4 chunks. The backend health endpoint should report `instructionMonitor.embeddings.source: "explicit"`.
 - Similarity routing now separates fingerprint and semantic evidence: exact/loose SHA-256 or SimHash matches against stored `ADVERSARIAL` records remain adversarial blocks, while semantic whole-prompt or chunk-embedding matches are suspicious review events.
 - Protected backend execution routes now require the shared bearer token. `/v1/intercept`, `/v1/translate`, `/v1/instruction-monitor/reviewed-adversarial`, and `/v1/ctf/sam-spade/*` reject unauthenticated requests.
 - Browser callers no longer send backend runtime overrides for provider endpoints, model base URLs, backend-owned system prompts, responder, Sam Spade, or Lara translation. The Analyst Runtime Settings Safeguard API Key is the intentional exception: it is browser-memory-only and can be forwarded with Analyst Chat `/v1/intercept` requests for local LM Studio testing.
+- The promoted Safeguard Effective Prompt is hardcoded in `DEFAULT_SYSTEM_CONFIG.safeguardEffectivePromptOverride`. Startup parsing normalizes blank values and previous app-generated baseline prompts back to the promoted default, so first-open/upgraded sessions should show the recommended and current hash as `590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0` unless an operator saved a true custom prompt.
 - Sam Spade sessions are owner-scoped by the authenticated caller id. Fetch/message/solve operations for another caller return not found or forbidden, and the frontend sends `x-counter-spy-user-id` through the shared backend API client.
 - Firestore audit-log client creates now have a narrow rules allowlist and reject backend-owned security fields such as safeguard verdicts, gateway status, review state, and responder telemetry.
-- Analyst Chat Last Execution Results now orders local verdict alert first, then backend safeguard/monitor and Similarity Monitor detail, then `Detections` badges. Shared help/info icons are hidden while modal overlays are active except inside the open dialog content.
+- Analyst Chat Last Execution Results now orders local verdict alert first, then backend safeguard status and Similarity Monitor detail, then `Detections` badges. Shared help/info icons are hidden while modal overlays are active except inside the open dialog content. Similarity Monitor evidence is also rendered from persisted `instructionSimilarity` data in the Prompt Details modal so it remains available after another prompt replaces the side rail. Stored hashes now include `Lookup`, backed by `/v1/instruction-monitor/records/:identifier`, and Active Guardrails includes a real Similarity Monitor toggle that sends `instructionSimilarityEnabled: false` when disabled.
 - The Safeguard LLM may be disabled during feature testing. Feature-vector extraction must still run because it is calculated before any Safeguard LLM forwarding.
 - Local review mode stores telemetry in memory. After a refresh, the Metrics card may show no feature-vector audit events until a new prompt is submitted.
+
+## Documentation Accuracy Pass
+
+This handoff was updated after a read-only discrepancy review followed by an approved documentation patch pass. `CLAUDE.md` was excluded from the pass because the user said it will be deleted.
+
+Completed documentation corrections:
+
+- Runtime governance wording now reflects the actual backend schema: browser-supplied safeguard endpoints/model IDs are rejected, but `metadata.safeguardEffectivePrompt` is allowlisted and forwarded verbatim, and optional `metadata.safeguardApiKey` is still supported for browser-memory local LM Studio testing.
+- Threshold documentation now matches code: entropy suspicious floor `> 3.8`, syntactic suspicious default `65`, syntactic adversarial cutoff `90`, whole-prompt embedding `>= 0.78`, chunk embedding `> 0.72`, attention pool `> 0.70`, and sandwich delta `> 0.20` with chunk `> 0.72`.
+- `/v1/intercept` docs now include the authenticated `tuning` object: `entropyThreshold`, `syntacticThreshold`, `blockedKeywords`, `forbiddenTopics`, and `regexRules`.
+- Local development docs now call out Node `22.5+`, explicit matching backend/frontend bearer tokens, current `core-2026-05-10-latest` seed metadata (`319` records, `611` chunks, snapshot hash `2a98e22110240fe87582865bf5ebace17d97074414c06ef495c53239e295465b`), and safeguard-provider caveats for smoke tests.
+- `File_Structure.md` now includes the backend implementation tree, seed snapshots, infra templates, compose files, and missing library modules.
+- SBOM now records missing direct dependencies/build tooling and package overrides: `react-dom`, `@vitejs/plugin-react`, `@tailwindcss/vite`, `hono`, `protobufjs`, and `esbuild`.
+- Stale governance/ops language was corrected: EU AI Act PII wording no longer claims redaction happens before data leaves the client, root ATLAS IDs now use the active taxonomy or explicitly legacy IDs, `PII_LEAK` was replaced with `SENSITIVE_DATA_EXPOSURE`, and stale `Hide Simulated` / purple review-style references were removed.
+
+Verification:
+
+- `git diff --check` passed after the doc updates.
+- A targeted discrepancy scan was run for old thresholds, stale flags, invalid ATLAS IDs, and explicit `rehype-raw` claims. Remaining hits were benign section numbers, sample values, historical handoff references, or the intentionally corrected `react-markdown` wording.
+
+Working-tree caution: many files were already modified before this documentation pass, including source and package files. Do not assume every modified file belongs to the doc cleanup.
 
 ## Feature Pressure Semantics
 
@@ -43,6 +65,8 @@ The six normalized component pressures are:
 ## Metrics Card Behavior
 
 The Metrics view has a **Feature Pressure** card.
+
+The Metrics view also rolls unreviewed `Suspicious` results into operational `Review` counts. This is display/workload aggregation only: audit records and detailed severity labels remain `Suspicious`, while the Alert Severity `Review` bucket, severity trend, and HITL Queue `Pending Review` count include those borderline items.
 
 - `Avg Feature Pressure` is shown as `x / 100`.
 - The six component rows are shown as average percentages across submitted prompts with feature vectors:

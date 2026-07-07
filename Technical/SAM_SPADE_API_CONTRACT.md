@@ -1,6 +1,6 @@
 # Sam Spade API Contract
 
-This document defines the current local API boundary for the Sam Spade CTF surface inside Counter-Spy.ai. The implementation currently runs inside the main backend process, but the contract is shaped so the Sam Spade logic can later move into its own containerized service without forcing a frontend rewrite.
+This document defines the current local API boundary for the Sam Spade CTF surface inside Safeguard LLM. The implementation currently runs inside the main backend process, but the contract is shaped so the Sam Spade logic can later move into its own containerized service without forcing a frontend rewrite.
 
 ## Goals
 
@@ -223,7 +223,7 @@ For blocked CTF attempts:
 
 The contract is intentionally stable enough to support:
 
-`Sam Spade frontend shell -> Counter-Spy.ai backend proxy -> Sam Spade service container`
+`Sam Spade frontend shell -> Safeguard LLM backend proxy -> Sam Spade service container`
 
 Possible later split:
 
@@ -231,4 +231,4 @@ Possible later split:
 - `counter-spy-backend`
 - `sam-spade-service`
 
-In that model, Counter-Spy.ai can remain the policy/governance/review surface while Sam Spade owns scenario logic and session progression.
+In that model, Safeguard LLM can remain the policy/governance/review surface while Sam Spade owns scenario logic and session progression.

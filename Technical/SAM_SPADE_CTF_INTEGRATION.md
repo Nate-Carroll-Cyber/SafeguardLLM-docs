@@ -2,7 +2,7 @@
 
 | Version | Date | Description |
 | :--- | :--- | :--- |
-| v1.0 | 2026-04-18 | Initial integration specification for the Sam Spade conversational CTF inside Counter-Spy.ai. |
+| v1.0 | 2026-04-18 | Initial integration specification for the Sam Spade conversational CTF inside Safeguard LLM. |
 | v1.1 | 2026-04-21 | Runtime sync: provenance normalized to `ctf_chat`, and every submission mirrors into the shared governed review path. |
 | v1.2 | 2026-04-24 | Runtime sync: clean Sam Spade turns now use the downstream responder after local and safeguard approval, with admin-managed persona/scenario prompts assembled backend-side. |
 | v1.3 | 2026-04-25 | Runtime sync: sensitive redaction placeholders are intercepted before gameplay/responder inference, and blocked CTF surfaces display only `Bad content.` while Audit Logs retain sanitized review artifacts. |
@@ -11,7 +11,7 @@
 
 ## 1. Purpose
 
-This document defines how the **Sam Spade** conversational elicitation scenario should be integrated into Counter-Spy.ai without inheriting the security and architecture weaknesses of the prototype reference implementation.
+This document defines how the **Sam Spade** conversational elicitation scenario should be integrated into Safeguard LLM without inheriting the security and architecture weaknesses of the prototype reference implementation.
 
 The goal is to preserve:
 - the noir presentation
@@ -29,7 +29,7 @@ The goal is **not** to preserve:
 
 ## 2. Product Intent
 
-The Sam Spade experience is not a standalone chatbot. It is a **research-grade adversarial conversation surface** that feeds Counter-Spy.ai.
+The Sam Spade experience is not a standalone chatbot. It is a **research-grade adversarial conversation surface** that feeds Safeguard LLM.
 
 ### 2.1 Intended User Experience
 
@@ -43,13 +43,13 @@ The analyst should feel like they are:
 - able to review how prompts evolve over time
 - able to compare game traffic with Analyst Chat, Playground, and Bulk Ingest traffic
 
-### 2.2 Intended Counter-Spy.ai Role
+### 2.2 Intended Safeguard LLM Role
 
-Counter-Spy.ai should sit **between the game UI and the character-response service**.
+Safeguard LLM should sit **between the game UI and the character-response service**.
 
 That means:
 - the game frontend never talks directly to an LLM provider
-- game prompts go through Counter-Spy.ai sanitization and governance first
+- game prompts go through Safeguard LLM sanitization and governance first
 - approved prompts are forwarded to the NPC orchestration backend
 - responses are returned through the same control-plane path
 - prompts and outcomes are auditable inside the existing review workflow
@@ -112,7 +112,7 @@ Victory evaluation should be:
 
 ### 4.4 Remove Client-Trusted Logging
 
-The browser can propose metadata, but authoritative audit records should be created by Counter-Spy.ai and related backend services, not by the game client alone.
+The browser can propose metadata, but authoritative audit records should be created by Safeguard LLM and related backend services, not by the game client alone.
 
 ---
 
@@ -120,7 +120,7 @@ The browser can propose metadata, but authoritative audit records should be crea
 
 ```mermaid
 flowchart LR
-  A["Sam Spade Game UI"] --> B["Counter-Spy.ai Frontend API Boundary"]
+  A["Sam Spade Game UI"] --> B["Safeguard LLM Frontend API Boundary"]
   B --> C["Sanitization + Governance Layer"]
   C -->|Approved| D["NPC Orchestration Backend"]
   C -->|Queued/Blocked| E["Analyst Review + Audit Logs"]
@@ -132,12 +132,12 @@ flowchart LR
 ### 5.1 High-Level Flow
 
 1. Player submits a message in the Sam Spade UI
-2. Counter-Spy.ai receives the prompt as a distinct `source`
+2. Safeguard LLM receives the prompt as a distinct `source`
 3. Sanitization and guardrails run first
 4. If blocked or queued, the attempt is handled by the normal governance path
 5. If approved, the message is forwarded to the Sam Spade orchestration service
 6. The orchestration service updates game state, evaluates progression, and generates the next NPC response
-7. Counter-Spy.ai records the interaction in Audit Logs
+7. Safeguard LLM records the interaction in Audit Logs
 8. Analysts can review the conversation just like any other governed traffic
 
 ---
@@ -153,7 +153,7 @@ The Sam Spade frontend should be intentionally narrow.
 - local session UX state
 - lightweight progression indicators
 - optional clue-board or notebook UI
-- transport of player messages to Counter-Spy.ai
+- transport of player messages to Safeguard LLM
 
 ### 6.2 Frontend Must Not Own
 
@@ -187,9 +187,9 @@ The Sam Spade frontend should be intentionally narrow.
 
 ---
 
-## 7. Counter-Spy.ai Responsibilities
+## 7. Safeguard LLM Responsibilities
 
-Counter-Spy.ai should treat the Sam Spade game as another governed input source.
+Safeguard LLM should treat the Sam Spade game as another governed input source.
 
 ### 7.1 New Provenance Source
 
@@ -202,7 +202,7 @@ This allows:
 - metrics comparisons
 - future reporting on player behavior and elicitation trends
 
-### 7.2 Counter-Spy.ai Responsibilities In This Flow
+### 7.2 Safeguard LLM Responsibilities In This Flow
 
 - sanitize the player prompt
 - detect obfuscation, injection, exfiltration, and non-plain-text garbage
@@ -407,7 +407,7 @@ This scenario can become a controlled dataset for:
 
 The first integration does not need to be large.
 
-### 13.1 Recommended Frontend-to-Counter-Spy API
+### 13.1 Recommended Frontend-to-Safeguard LLM API
 
 `POST /v1/ctf/sam-spade/message`
 
@@ -437,11 +437,11 @@ The first integration does not need to be large.
 
 ### 13.2 Recommended Internal Split
 
-- Counter-Spy endpoint receives player message
-- Counter-Spy sanitizes / governs / logs
+- Safeguard LLM endpoint receives player message
+- Safeguard LLM sanitizes / governs / logs
 - approved prompts are forwarded internally to Sam Spade orchestration and then to the configured downstream responder when responder routing is enabled
 - orchestration returns responder-backed or local-passthrough Sam Spade response + state deltas
-- Counter-Spy returns a stable frontend response contract
+- Safeguard LLM returns a stable frontend response contract
 
 ---
 
@@ -458,7 +458,7 @@ The first integration does not need to be large.
 
 - simple interrogation screen
 - no direct provider access
-- route all turns through Counter-Spy.ai
+- route all turns through Safeguard LLM
 
 ### Phase 3: Audit and Metrics Integration
 
@@ -488,7 +488,7 @@ The first integration does not need to be large.
 This integration is not intended to:
 - preserve the original prototype’s direct Gemini/browser architecture
 - let the frontend inspect the canonical secret
-- treat the game as a standalone app outside Counter-Spy.ai
+- treat the game as a standalone app outside Safeguard LLM
 - bypass governance because it is “just a game”
 
 ---
@@ -498,7 +498,7 @@ This integration is not intended to:
 After this spec, the next best artifact is:
 
 1. a **session-state and API schema draft**, or
-2. a **screen-by-screen Sam Spade game flow** mapped directly to Counter-Spy.ai components
+2. a **screen-by-screen Sam Spade game flow** mapped directly to Safeguard LLM components
 
 The best implementation sequence is:
 - backend contract first

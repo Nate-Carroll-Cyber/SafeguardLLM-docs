@@ -1,5 +1,5 @@
 # 🛡️ Analyst & Administrator Operations Guide
-## Counter-Spy.ai
+## Safeguard LLM
 
 | Version | Date | Description |
 | :--- | :--- | :--- |
@@ -9,7 +9,7 @@
 
 ## 1. Operational Overview
 
-Counter-Spy.ai is an **Adversary-Aware Security Gateway**. It sits between untrusted user input and Large Language Models (LLMs) to provide a deterministic security layer. Unlike traditional firewalls, it does not simply block known bad patterns — it analyzes the **intent, complexity, and randomness** of incoming traffic to identify zero-day prompt injections and model reverse-engineering attempts. In the current Beta, deterministic enforcement and model guidance are both present: exact policy hits remain phrase-based, while the saved firewall prompt also steers the decision model across the operator-managed forbidden categories.
+Safeguard LLM is an **Adversary-Aware Security Gateway**. It sits between untrusted user input and Large Language Models (LLMs) to provide a deterministic security layer. Unlike traditional firewalls, it does not simply block known bad patterns — it analyzes the **intent, complexity, and randomness** of incoming traffic to identify zero-day prompt injections and model reverse-engineering attempts. In the current Beta, deterministic enforcement and model guidance are both present: exact policy hits remain phrase-based, while the saved firewall prompt also steers the decision model across the operator-managed forbidden categories.
 
 As an Analyst or Administrator, you are the final decision-maker in the **Human-in-the-Loop (HITL)** cycle. Your primary goal is to maintain the balance between **System Resilience** (blocking attacks) and **User Experience** (minimizing false positives).
 
@@ -38,6 +38,8 @@ The dashboard tracks the rate of threats (Suspicious or Adversarial logs) over a
 
 **Current Beta note:** The Metrics surface provides real-time threat velocity and alert-severity visibility from audit records. The local anomaly helper currently computes a rolling spike ratio against a 24-hour hourly baseline, not a production incidenting service with PagerDuty/Slack delivery. If your deployment uses formal Z-score thresholds, calculate and alert on those in the production telemetry pipeline.
 
+Operational review note: Metrics keeps audit details faithful to the underlying severity, but it counts unreviewed `Suspicious` outcomes as `Review` for workload reporting. The HITL Queue `Pending Review` total therefore includes suspicious borderline traffic that still needs analyst attention.
+
 **Production target:** A Z-score can measure how many standard deviations the current threat rate is from the mean:
 
 $$Z = \frac{x - \mu}{\sigma}$$
@@ -61,7 +63,7 @@ $$Z = \frac{x - \mu}{\sigma}$$
 > **Notification Escalation:** PagerDuty/Slack incident creation is a planned production integration, not current repo functionality. In the current Beta, operators should treat high spike indicators as a manual escalation trigger.
 
 > [!TIP]
-> Use the **Hide Simulated** toggle to filter out bulk ingest and test data, ensuring metrics reflect real-world user intent only.
+> Use the Metrics source filter to isolate Analyst Chat, Bulk Ingest, Playground, or CTF Chat traffic when separating live review work from controlled tests.
 
 ### 3.2 Entropy Analysis
 
@@ -78,10 +80,10 @@ $$H(X) = -\sum_{i=1}^{n} P(x_i) \log_b P(x_i)$$
 
 | Guardrail | Suspicious | Adversarial | Purpose |
 | :--- | :--- | :--- | :--- |
-| **Entropy** | `> 3.2` | `> configured Entropy Threshold` | Shared entropy policy used by submit-time sanitization, Audit Logs, and Metrics |
-| **Syntactic Complexity** | 50 | 90 | Catching instruction stacking |
+| **Entropy** | `> 3.8` | `> configured Entropy Threshold` | Shared entropy policy used by submit-time sanitization, Audit Logs, and Metrics |
+| **Syntactic Complexity** | 65 | 90 | Catching instruction stacking |
 
-Operator note: entropy now has two roles. First, it contributes a direct verdict band: above `3.2` is `Suspicious`, and above the configured threshold is `Adversarial`. Second, it still acts as supporting concealment telemetry in Prompt Details and Metrics. Recognized obfuscation families remain adversarial by policy even when the entropy score alone would not cross the configured ceiling.
+Operator note: entropy now has two roles. First, it contributes a direct verdict band: above `3.8` is `Suspicious`, and above the configured threshold is `Adversarial`. Second, it still acts as supporting concealment telemetry in Prompt Details and Metrics. Recognized obfuscation families remain adversarial by policy even when the entropy score alone would not cross the configured ceiling.
 
 Operator note: `Blocked Topics` metrics currently count normalized phrase-family hits, not a separate semantic topic classifier. If a request is semantically close to a forbidden category but does not literally match one of the configured topic phrases after supported recovery or normalization, it may still be influenced by the firewall prompt without incrementing `Topic Hits`.
 
@@ -93,7 +95,7 @@ Operator note: `Blocked Topics` metrics currently count normalized phrase-family
 
 ### 4.1 Review Process
 
-1. **Identify:** Locate logs with the purple `REVIEW` status in the queue.
+1. **Identify:** Locate logs with the `REVIEW` status in the queue.
 2. **Inspect:** Use the **Full Prompt Inspection** dialog to view the persisted sanitized prompt, response, detection flags, obfuscation telemetry, and backend timing fields. Raw un-redacted prompt storage is not enabled in the current Beta.
 3. **Cross-Reference:** Check the **Session ID** to identify whether this user has had multiple previous interceptions.
 4. **Verdict:** Assign a **Resultant Severity** using the Decision Tree below.
@@ -183,12 +185,12 @@ Only promote logs that meet at least one of the following criteria:
 | `ReDoS_ATTEMPT_DETECTED` | **Critical** | Sanitization latency exceeded 1,000ms. The triggering request was blocked before inference, logged as adversarial, and automatic Global System Pause was activated for subsequent traffic. |
 | `TOKEN_DILUTION` | **High** | High local entropy spike in sliding window. Obfuscated payload buried in noise text. |
 | `SYNTACTIC_PROBE` | **Medium** | Elevated density of imperative verbs (e.g., "forget," "ignore," "must"). Indicates system override attempt. |
-| `PII_LEAK` | **Variable** | Detection of SSN, email addresses, or AWS keys. Verify whether redaction succeeded before releasing. |
+| `SENSITIVE_DATA_EXPOSURE` | **Variable** | Detection of sensitive placeholders, credentials, or personal data that should not proceed to gameplay/responder inference. Verify whether redaction succeeded before releasing. |
 | `CANARY_EXFIL` | **Critical** | Prompt or response contained the unique `COUNTERSPY_CANARY_TOKEN`. Indicates System Instruction breach — activate HOTL immediately. |
 
 ## Obfuscation Posture
 
-Counter-Spy.ai currently operates as a plain-text English chatbot control plane. Under that posture:
+Safeguard LLM currently operates as a plain-text English chatbot control plane. Under that posture:
 
 - Any recognized obfuscation signal is treated as `Adversarial`.
 - Analysts should not expect leetspeak, ROT13, symbol substitution, coordinate ciphers, recursive decode chains, or similar concealment patterns to remain merely `Suspicious`.

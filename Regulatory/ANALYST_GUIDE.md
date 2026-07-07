@@ -1,17 +1,18 @@
-# Analyst & Administrator Operations Guide: Counter-Spy.ai
+# Analyst & Administrator Operations Guide: Safeguard LLM
 
 | Version | Date | Description |
 | :--- | :--- | :--- |
 | v2.0 | 2026-04-21 | Promotion to Beta: stabilized local demo stack, guarded backend responder path, Lara translation modes, Sam Spade governed intake, and layered defense funnel metrics. |
 | v2.1 | 2026-04-25 | Runtime sync: backend safeguard attribution is now structured in audit/metrics records, and blocked Sam Spade CTF content is masked as `Bad content.` on gameplay surfaces. |
 | v2.2 | 2026-05-07 | Instruction similarity monitor: backend pgvector memory now detects exact, loose-hash, SimHash, and semantic prompt matches before responder forwarding. Adversarial fingerprint reuse blocks; semantic overlap routes to suspicious review. The local demo database is clean on Postgres container recreation. |
-| v2.3 | 2026-05-08 | Security remediation: protected execution routes now require backend bearer auth, browser-supplied backend runtime overrides are rejected, Lara translation is backend-configured only, Sam Spade sessions are owner-scoped, and Firestore audit-log creates have a tighter allowlist. |
+| v2.3 | 2026-05-09 | Security remediation plus Similarity Monitor workflow: protected execution routes now require backend bearer auth, browser-supplied backend endpoint/model overrides are rejected, allowlisted safeguard prompt and local safeguard-key fields remain explicit runtime inputs, Lara translation is backend-configured only, Sam Spade sessions are owner-scoped, Firestore audit-log creates have a tighter allowlist, stored-hash lookup opens an Instruction Match view, and Active Guardrails can disable pgvector comparison per request. |
+| v2.5 | 2026-05-10 | Safeguard Effective Prompt runtime hardening and corpus refresh: promoted prompt defaults are hardcoded and legacy generated baselines auto-align on startup, provider safeguard calls fail closed without an explicit effective prompt, Sam Spade metadata carries the effective prompt contract, and the bundled pgvector `core` seed snapshot advances to `core-2026-05-10-latest`. |
 
 ---
 
 ## 1. Operational Overview
 
-Counter-Spy.ai is a real-time governance and security orchestration platform designed to sit between users and Large Language Models (LLMs). Its primary purpose is to detect, intercept, and audit adversarial attempts—such as prompt injections, data exfiltration, and model probing—before they reach the inference engine.
+Safeguard LLM is a real-time governance and security orchestration platform designed to sit between users and Large Language Models (LLMs). Its primary purpose is to detect, intercept, and audit adversarial attempts—such as prompt injections, data exfiltration, and model probing—before they reach the inference engine.
 
 As an Analyst or Administrator, your role is to monitor the threat landscape, tune the automated firewall, and manually intervene when the system identifies borderline or high-risk activity.
 
@@ -58,7 +59,7 @@ To identify "low and slow" persistent attackers, analysts must look beyond indiv
 Intercepted prompts appear in the **Audit Logs** with a stored status of `PENDING_REVIEW`, displayed in the UI as `REVIEW`. 
 
 **Step-by-Step Review Process:**
-1.  **Identify:** Locate logs with the purple `REVIEW` label (`PENDING_REVIEW` status).
+1.  **Identify:** Locate logs with the `REVIEW` label (`PENDING_REVIEW` status).
 2.  **Inspect:** Click the truncated prompt to open the **Full Prompt Inspection** dialog.
 3.  **Analyze:** Evaluate the prompt using the decision tree below.
 4.  **Action:** Use the dropdown menu in the log entry to assign a **Resultant Severity** (Clean, Informational, Suspicious, or Adversarial).
@@ -108,8 +109,8 @@ Thresholds can be adjusted in the **Knowledge Base -> System Configuration** sec
 ### 5.1 Recommended Baselines
 | Guardrail | Suspicious Threshold | Adversarial Threshold | Description |
 | :--- | :--- | :--- | :--- |
-| **Entropy** | > 3.6 | Configured Entropy Threshold | Detects obfuscated payloads and borderline high-entropy prompts. |
-| **Syntactic Complexity** | 50 | 90 | Detects instruction stacking and probing. |
+| **Entropy** | > 3.8 | Configured Entropy Threshold | Detects obfuscated payloads and borderline high-entropy prompts. |
+| **Syntactic Complexity** | 65 | 90 | Detects instruction stacking and probing. |
 
 > [!NOTE]
 > If you notice a high False Positive Rate (FPR), consider raising the configured Entropy Threshold. If you are missing "jailbreak" attempts, lower the Syntactic Complexity threshold to 40.
@@ -141,11 +142,13 @@ Not every flagged log is suitable for the Golden Set. To ensure high-quality tra
 | `ReDoS_ATTEMPT_DETECTED` | Input caused the sanitizer to exceed the 1,000ms fail-secure latency threshold. | **Critical Block.** Likely a DoS attack; Global System Pause should activate. |
 | `TOKEN_DILUTION` | High entropy detected in a specific 35-char window. | Inspect for hidden shellcode or encoded payloads. |
 | `SYNTACTIC_PROBE` | High density of imperative constraints detected. | Check for "Ignore previous instructions" patterns. |
-| `PII_LEAK` | Redactor identified emails, keys, or SSNs. | Ensure redaction was successful; block if sensitive. |
+| `SENSITIVE_DATA_EXPOSURE` | Redactor identified sensitive placeholders, credentials, or personal data that should not proceed to gameplay/responder inference. | Ensure redaction was successful; keep the request blocked or queued when sensitive content remains material. |
 | `REGEX_BYPASS` | Input matched a known injection pattern. | Review the specific regex rule triggered in the log. |
 | `INSTRUCTION_SIMILARITY_MATCH` | Backend instruction memory found an exact, loose-hash, SimHash, or semantic match before responder forwarding. Fingerprint matches against stored adversarial records block; semantic matches queue as suspicious review. | For semantic matches, review the matched prompt family and decide whether to label or promote it. For adversarial fingerprint matches, verify the stored hash lineage and leave the block in place unless the source label was wrong. |
 
-Similarity Monitor reason labels map to specific backend criteria. `Exact Sha256` and `Loose Sha256` are strict equality checks against stored hashes. `Simhash 2gram`, `Simhash 3gram`, and `Simhash 4gram` indicate structural fingerprint proximity within the configured Hamming threshold (`<= 12` by default). `Embedding`, `Chunk Embedding`, `Attention Pool`, and `Sandwich Delta` are semantic/chunk signals and should be treated as review evidence unless a later deterministic rule is promoted.
+Similarity Monitor reason labels map to specific backend criteria. `Exact Sha256` and `Loose Sha256` are strict equality checks against stored hashes. `Simhash 2gram`, `Simhash 3gram`, and `Simhash 4gram` indicate structural fingerprint proximity within the configured Hamming threshold (`<= 12` by default). `Embedding`, `Chunk Embedding`, `Attention Pool`, and `Sandwich Delta` are semantic/chunk signals and should be treated as review evidence unless a later deterministic rule is promoted. The Last Execution Results rail shows only the most recent run; use Audit Logs -> Prompt Details to review persisted Similarity Monitor evidence from older entries. Use the `Lookup` action beside a stored hash to open the protected Instruction Match view, which shows the source record, strict/loose hashes, stored verdict, stored prompt preview, and chunk previews for comparison.
+
+Admins can disable the Similarity Monitor under Active Guardrails when demonstrating deterministic or safeguard-only behavior. That switch sends `instructionSimilarityEnabled: false` to `/v1/intercept`, so pgvector comparison is skipped for the request rather than hidden after the fact.
 
 ---
 

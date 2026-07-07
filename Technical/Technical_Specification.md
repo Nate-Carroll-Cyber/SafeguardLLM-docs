@@ -1,6 +1,6 @@
-# Technical Reference & Architecture Specification: Counter-Spy.ai
+# Technical Reference & Architecture Specification: Safeguard LLM
 
-**Version:** v2.2
+**Version:** v2.5
 **Status:** Beta / Promotion to Beta  
 **Classification:** Proprietary / AppSec Engineering  
 
@@ -8,14 +8,14 @@
 
 ## 1. Architecture Deep Dive: The 'Shield-and-Sword' Pattern
 
-Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure Large Language Model (LLM) interactions. This multi-stage defense-in-depth strategy ensures that adversarial payloads are neutralized at the edge before reaching high-compute inference engines.
+Safeguard LLM employs a **Shield-and-Sword** architectural pattern to secure Large Language Model (LLM) interactions. This multi-stage defense-in-depth strategy ensures that adversarial payloads are neutralized at the edge before reaching high-compute inference engines.
 
 ### 1.1 Logical Flow
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
-2.  **The Sword (Backend-Mediated Inference):** The backend gateway runs deterministic prechecks, compares clean candidates against the pgvector-backed instruction similarity monitor when enabled, calls an OpenAI-compatible safeguard judge, then forwards only `CLEAN` payloads to the downstream responder when responder routing is enabled. Safeguard runtime configuration is separate from responder runtime configuration, and both paths use backend-managed credentials, endpoints, and backend-owned system prompts. Browser callers cannot override provider base URLs, API keys, model base URLs, or backend prompt text on protected execution paths.
-    *   **Current prompt-contract note:** The safeguard judge receives a backend-owned instruction for inspection and forwarding decisions, including the single runtime JSON verdict contract, neutral evidence contract, forbidden-category guidance, and promoted few-shot examples. System Configuration previews and hashes recommended/current safeguard prompt artifacts for review, but protected backend execution does not accept caller-supplied safeguard or responder system prompts. The safeguard judge receives a candidate prompt after deterministic normalization/redaction plus neutral preprocessing evidence; it does not receive the local sanitizer's final verdict or reasoning. Clean traffic is forwarded to the responder only after it clears the safeguard judge and responder routing remains enabled. When responder routing is disabled, clean safeguard verdicts return local responder passthrough instead. Legacy decision-shaped, malformed, or non-JSON safeguard outputs are treated as `SUSPICIOUS` and queued for review. Safeguard upstream calls are bounded by `SAFEGUARDS_TIMEOUT_MS` (default 30s), with browser-side `/v1/intercept` abort as a secondary 45s guard.
-    *   **Current forbidden-category note:** Configured forbidden phrases are enforced locally and included in the Safeguard Effective Prompt, which remains the reviewable source for baseline category and gibberish guidance.
+2.  **The Sword (Backend-Mediated Inference):** The backend gateway runs deterministic prechecks, compares clean candidates against the pgvector-backed instruction similarity monitor when enabled, calls an OpenAI-compatible safeguard judge, then forwards only `CLEAN` payloads to the downstream responder when responder routing is enabled. Safeguard runtime configuration is separate from responder runtime configuration, and both paths use backend-managed credentials and endpoints. Browser callers cannot override provider base URLs, API keys, model base URLs, or downstream responder prompt text on protected execution paths.
+    *   **Current prompt-contract note:** The safeguard judge receives the current System Configuration **Safeguard Effective Prompt** as its system prompt exactly as saved and submitted by the frontend. The default System Configuration hardcodes the recommended prompt in `safeguardEffectivePromptOverride`; empty legacy values and previous app-generated baseline prompts are normalized back to that promoted default at startup, so first-open and upgraded deployments do not require an operator reset to align hashes. Custom non-empty prompt overrides are preserved and remain visible as drift. Clear forbidden-category violations, such as medication or dosage advice, must return `ADVERSARIAL` and block; `SUSPICIOUS` is reserved for ambiguous or review-needed evidence. System Configuration previews and hashes recommended/current safeguard prompt artifacts for review; the current promoted recommended baseline hash and aligned current safeguard prompt hash are `590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0`. The safeguard judge receives a candidate prompt after deterministic normalization/redaction plus neutral preprocessing evidence; it does not receive the local sanitizer's final verdict or reasoning. Clean traffic is forwarded to the responder only after it clears the safeguard judge and responder routing remains enabled. When responder routing is disabled, clean safeguard verdicts return local responder passthrough instead. Legacy decision-shaped, malformed, or non-JSON safeguard outputs are treated as `SUSPICIOUS` and queued for review. Safeguard upstream calls are bounded by `SAFEGUARDS_TIMEOUT_MS` (default 30s), with browser-side `/v1/intercept` abort as a secondary 45s guard.
+    *   **Current forbidden-category note:** Configured forbidden phrases are enforced locally and included in the Safeguard Effective Prompt, which remains the reviewable source for baseline category and gibberish guidance. Confirmed forbidden-category matches block as `ADVERSARIAL`; uncertain matches queue as `SUSPICIOUS`.
 
 ### 1.2 System Resilience & Fallback Policies
 The Beta implementation adheres to a **Fail-Secure** philosophy across all critical components:
@@ -46,8 +46,8 @@ To catch alphabetic substitution gibberish that still resembles plain prose, the
 
 ### 2.1.2 Entropy Policy Bands
 The current Beta uses one shared entropy policy across the submit-time firewall, Audit Logs, and Metrics.
-*   **Allowed:** prompt entropy `<= 3.6`
-*   **Suspicious:** prompt entropy `> 3.6` and `<= configured Entropy Threshold`
+*   **Allowed:** prompt entropy `<= 3.8`
+*   **Suspicious:** prompt entropy `> 3.8` and `<= configured Entropy Threshold`
 *   **Adversarial:** prompt entropy `> configured Entropy Threshold`
 *   **Operator Meaning:** the governance slider now sets the maximum approved entropy before a prompt becomes adversarial; it no longer acts as the suspicious floor.
 
@@ -55,19 +55,19 @@ The current Beta uses one shared entropy policy across the submit-time firewall,
 The analyzer uses a weighted heuristic to detect "Instruction Stacking":
 *   **Constraint Density (High Weight):** Frequency of imperative keywords.
 *   **Special Char Ratio (Medium Weight):** Inverse-match regex `/[a-zA-Z0-9\s]/g` to detect code-like syntax.
-*   **Thresholds:** Scores > 50 contribute to `Suspicious` classification; scores > 90 independently trigger `Adversarial` classification.
+*   **Thresholds:** Scores at or above the configured suspicious threshold (`65` by default) contribute to `Suspicious` classification; scores at or above `90` independently trigger `Adversarial` classification.
 *   **Pre-Inference Feature Vector:** The Playground now exposes the raw syntactic components behind the score, including weighted constraint pressure, density contribution, wrapper count, verbosity bonus, and obfuscation bonus. These fields feed the analysis-only Feature Pressure score and do not change runtime verdict thresholds. The Metrics dashboard averages all six normalized component pressures across submitted prompts: instruction, constraint density, syntax/wrapper, obfuscation, entropy, and n-gram.
 *   **N-Gram Obfuscation Telemetry:** The Playground feature vector includes English trigram hit rate, best Caesar-shift trigram recovery, and the low n-gram likelihood boolean used to explain alphabetic gibberish detections. This is separate from the runtime Foreign / Mixed Language detection signal.
 
 ### 2.3 Obfuscation Severity Policy
-Counter-Spy.ai now treats prompt concealment itself as a hostile act in the governed path.
+Safeguard LLM now treats prompt concealment itself as a hostile act in the governed path.
 *   **Policy:** Any recognized decode/structural obfuscation signal is classified as `Adversarial`, even if the concealed content would otherwise decode into something benign. Pig Latin is detected without lossy decoding and routes to `Suspicious` / review unless another stronger signal fires.
 *   **Covered families:** Base64, continuous and byte-delimited Hex (`0x..`, `\x..`, and spaced/comma-separated bytes), 8-bit binary, ASCII decimal byte lists, A1Z26/alphabet-position encoding, URL encoding, HTML entities, unicode escapes, compatibility glyphs, symbol substitution, leetspeak, Pig Latin, ROT13, reverse text, NATO phonetic, Morse code, braille, regional indicators, recursive decode chains, coordinate ciphers, structural wrappers, vertical text, and low-English-likeness alphabetic gibberish.
 *   **Vertical reflow:** Alphabetic single-character columns and playground-style `x - position N` rows are reflowed into an additional detector candidate before keyword, regex, and jailbreak-structure checks run. `VERTICAL_TEXT` is emitted independently as an obfuscation signal, while digit-only enumerated lists are not reflowed.
 *   **Credit-card false-positive boundary:** Credit-card redaction requires card-shaped tokens with non-alphanumeric boundaries, valid major-network lengths, issuer prefix checks, and Luhn validation. Long hex hashes, content IDs, and transaction IDs are preserved for decoder analysis rather than being redacted as card data.
 *   **Routing rule:** Once the frontend sanitizer classifies a prompt as obfuscation-family `Adversarial` or otherwise locally `Suspicious`/`Adversarial`, that prompt should terminate before backend inference. Backend error messaging is reserved for prompts that were actually allowed to attempt `/v1/intercept`.
 
-### 2.4 Structural Jailbreak Signals
+### 2.5 Structural Jailbreak Signals
 The deterministic sanitizer now flags structural jailbreak patterns before the safeguard layer:
 *   `FORCED_PREFIX_INJECTION`: opening instructions that force the responder to start, begin, answer only with, or use a required first word/line/character.
 *   `ANTI_SANITIZATION_CLAUSE`: explicit requests to avoid sanitization, moderation, filtering, warnings, disclaimers, or safety policies.
@@ -119,7 +119,8 @@ Current Beta protected execution routes require a shared backend bearer credenti
 | `prompt` | `string` | The raw input string to be sanitized. |
 | `userId` | `string` | The unique identifier for the requesting user. |
 | `sessionId` | `string` | The identifier for the current interaction session. |
-| `metadata` | `object` | Strict allowlist only: `localReviewMode`, `source`, `providerLlmRoutingEnabled`, `responderLlmRoutingEnabled`, optional browser-memory `safeguardApiKey`, and optional instruction-monitor embedding fields. Browser callers cannot choose backend provider endpoints, model base URLs, or backend-owned system prompts. |
+| `metadata` | `object` | Strict allowlist only: `localReviewMode`, `source`, `providerLlmRoutingEnabled`, `responderLlmRoutingEnabled`, current `safeguardEffectivePrompt`, optional browser-memory `safeguardApiKey`, and optional instruction-monitor embedding fields. Browser callers cannot choose backend provider endpoints, model base URLs, or responder system prompts. |
+| `tuning` | `object` | Optional per-request guardrail tuning accepted from authenticated callers: `entropyThreshold`, `syntacticThreshold`, `blockedKeywords`, `forbiddenTopics`, and `regexRules`. Frontend submissions populate this from the active governance configuration. |
 
 Protected execution routes require the backend bearer credential before work begins: `/v1/intercept`, `/v1/translate`, `/v1/instruction-monitor/reviewed-adversarial`, and all `/v1/ctf/sam-spade/*` routes. Sam Spade routes also require the caller id header used by the frontend gateway client; created sessions are stored with that owner id, and fetch/message/solve operations reject cross-owner access. Translation is routed only through backend-managed Lara environment configuration and fails closed when Lara credentials are absent.
 
@@ -150,7 +151,7 @@ Decision-shaped payloads such as `ALLOW_AND_FORWARD`, `BLOCK`, `QUEUE_FOR_REVIEW
 | `502` | `RESPONDER_ERROR` | Downstream responder failure after safeguard approval. |
 | `503` | `SHIELD_ERROR` | Reserved for future Shield Engine transport failures outside the structured safeguard timeout path. |
 
-Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, retry marker, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records or structured gateway logs. Local responder passthrough is recorded with model `local-responder-passthrough` and status `DISABLED_LOCAL_ONLY`.
+Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, retry marker, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Safeguard LLM audit records or structured gateway logs. Local responder passthrough is recorded with model `local-responder-passthrough` and status `DISABLED_LOCAL_ONLY`.
 
 Instruction similarity hits are reported through `INSTRUCTION_SIMILARITY_MATCH` plus `INSTRUCTION_SIMILARITY_MEDIUM` or `INSTRUCTION_SIMILARITY_HIGH`. Exact SHA-256, loose SHA-256, and SimHash matches against stored `ADVERSARIAL` instructions retain the adversarial rating and are intercepted before responder forwarding with `backendGatewayStatus: INTERCEPTED` and `backendSafeguardVerdict: ADVERSARIAL`. Semantic whole-prompt or chunk-embedding matches are review evidence: they queue before responder forwarding with `backendGatewayStatus: QUEUED`, `backendSafeguardVerdict: SUSPICIOUS`, and backend reasoning that names the strongest match family.
 
@@ -173,7 +174,7 @@ These fields prevent model/safeguard interventions from being misclassified as l
 
 Sensitive-value redaction includes bare LLM provider API keys under the `LLM_API_KEY` label. The detector covers `sk_`, `sk-`, `sk-proj-`, and `sk-svcacct-` key forms even when they appear without an `api_key =` assignment prefix. Backend sanitization treats `LLM_API_KEY` as high-risk secret material and fails closed to `ADVERSARIAL`; frontend/local review redacts the same forms before audit display.
 
-When the backend instruction monitor returns a medium- or high-risk result, the frontend also persists an `instructionSimilarity` object on the audit record. That object records `highestRisk`, `matchCount`, and the strongest `topMatch`, including the stored `targetHash`, `targetVerdict`, `matchReasons`, and available similarity details. Semantic details include `cosineSimilarity`, `maxChunkSimilarity`, `attentionPooledChunkSimilarity`, and `sandwichDelta`. Fingerprint-only matches, embedding failures, or runs without available embeddings still preserve hash and SimHash evidence, but semantic score fields remain `null` or absent.
+When the backend instruction monitor returns a medium- or high-risk result, the frontend also persists an `instructionSimilarity` object on the audit record. That object records `highestRisk`, `matchCount`, and the strongest `topMatch`, including `targetId`, the stored `targetHash`, `targetVerdict`, `matchReasons`, and available similarity details. Semantic details include `cosineSimilarity`, `maxChunkSimilarity`, `attentionPooledChunkSimilarity`, and `sandwichDelta`. Fingerprint-only matches, embedding failures, or runs without available embeddings still preserve hash and SimHash evidence, but semantic score fields remain `null` or absent. Prompt Details renders this persisted Similarity Monitor evidence, so the match context remains accessible after the transient Last Execution Results rail is replaced by a later prompt. The stored hash also has a `Lookup` action that resolves `targetId` through the protected `/v1/instruction-monitor/records/:identifier` endpoint and opens a read-only `Instruction Match` modal with source, verdict, strict/loose hashes, flags, labels, stored prompt preview, and stored chunks.
 
 ### 5.4 Safeguard Schema and Divergence Observability
 Every safeguard decision emits structured JSON logs for metric extraction:
@@ -185,11 +186,13 @@ Every safeguard decision emits structured JSON logs for metric extraction:
 The expected mapping is `CLEAN -> CLEAN`, `SUSPICIOUS -> QUEUED`, and `ADVERSARIAL -> INTERCEPTED`. Any non-zero divergence on suspicious or adversarial traffic indicates orchestration-vs-judge drift and should be treated as a correctness issue.
 
 ### 5.5 Instruction Similarity Monitor
-The v2.2 backend instruction monitor stores observed instruction fingerprints in PostgreSQL with pgvector. Each record includes strict SHA-256, loose stopword-stripped SHA-256, 2/3/4-gram SimHash values, optional whole-prompt embedding, and optional overlapping chunk embeddings.
+The v2.5 backend instruction monitor stores observed instruction fingerprints in PostgreSQL with pgvector. Each record includes strict SHA-256, loose stopword-stripped SHA-256, 2/3/4-gram SimHash values, optional whole-prompt embedding, and optional overlapping chunk embeddings.
 
 The monitor compares exact/loose hashes, SimHash Hamming distance, whole-prompt ANN similarity, and chunk-level ANN similarity. Chunk ANN queries are concurrency-capped to protect the database pool. Deterministic fingerprint reuse of previously adversarial instructions is treated as adversarial and blocked; semantic overlap is treated as suspicious and routed to analyst review. The Docker demo uses `pgvector/pgvector:pg16` with PostgreSQL extension `vector` version `0.8.2` observed in the rebuilt demo database. Its Postgres data directory is tmpfs-backed, so recreating the Postgres container starts the instruction-memory database clean.
 
 The pgvector corpus is intentionally limited to reviewed `ADVERSARIAL` examples. "Reviewed" means an analyst has clicked through the review workflow and the resulting severity/rating is `Adversarial`; there is no separate approval state. Runtime comparison can evaluate any candidate against the corpus, but new records are not inserted unless they are explicitly marked reviewed with an adversarial verdict. Seed imports enforce the same rule: any `core` seed record that is not reviewed and adversarial fails validation before database writes begin.
+
+The Analyst Chat Active Guardrails list includes a `Similarity Monitor` switch. When disabled, the frontend sends `metadata.instructionSimilarityEnabled = false` to `/v1/intercept`; the backend skips `evaluateInstructionSimilarity()` for that request and returns the normal deterministic/safeguard result without pgvector evidence. This is an execution control, not a display-only filter.
 
 The `core` seed pack lives at `seeds/pgvector/core.json` and imports with `npm run instruction-monitor:seed:core`. Seed rows share the normal `instruction_records` and `instruction_chunks` tables, with explicit metadata columns: `seed_pack`, `seed_version`, `seed_record_hash`, `seed_snapshot_hash`, `seed_immutable`, `seed_imported_at`, and `seed_source`. Seed imports are idempotent. Matching hashes are skipped; changed immutable seed rows fail closed unless the operator uses an explicit migration/update flag.
 
@@ -202,7 +205,7 @@ The `core` seed pack lives at `seeds/pgvector/core.json` and imports with `npm r
 | `Simhash 3gram` | 3-word-window SimHash Hamming distance is within threshold. | `<= 12` |
 | `Simhash 4gram` | 4-word-window SimHash Hamming distance is within threshold. | `<= 12` |
 | `Embedding` | Whole-prompt pgvector cosine similarity meets the configured semantic threshold. | `>= 0.78` |
-| `Chunk Embedding` | Best overlapping chunk pgvector cosine similarity meets the configured semantic threshold. | `>= 0.78` |
+| `Chunk Embedding` | Best overlapping chunk pgvector cosine similarity meets the chunk-review threshold. | `> 0.72` |
 | `Attention Pool` | Instruction-intent-weighted chunk similarity is high enough to classify semantic overlap. | `> 0.70` risk threshold |
 | `Sandwich Delta` | Best chunk similarity substantially exceeds whole-prompt similarity, exposing an embedded instruction signal diluted by surrounding text. | `> 0.20` delta and chunk `> 0.72` |
 
@@ -220,6 +223,7 @@ The `source` field preserves provenance without hiding traffic from the primary 
 The platform utilizes a real-time anomaly detection engine to monitor threat velocity.
 *   **Current Baseline:** Tracks recent audit activity against a rolling 24-hour hourly baseline for threat-velocity and dashboard context.
 *   **Current Beta Spike Metric:** The Metrics surface reports threat velocity and alert severity from the current audit stream. The standalone anomaly helper currently calculates a rolling spike ratio against the 24-hour hourly baseline rather than a production incidenting Z-score service.
+*   **Review Workload Rollup:** Metrics preserves the stored audit `detectionLevel`, but dashboard workload views treat unreviewed `Suspicious` outcomes as `Review`. This means the Alert Severity `Review` bucket, 24-hour severity trend, and HITL Queue `Pending Review` count include borderline suspicious traffic even when the raw audit record remains `Suspicious`.
 *   **Planned Production Control:** A production deployment should add a true Z-score or equivalent statistical detector in the telemetry pipeline if formal Z-score thresholds are used operationally.
 *   **Alerting Thresholds:** 
     *   **Elevated spike indicator**: Treat as anomalous activity and increase monitoring cadence.

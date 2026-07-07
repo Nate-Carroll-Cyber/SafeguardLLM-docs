@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document records the current **MITRE ATLAS organizer taxonomy** used by Counter-Spy.ai for prompt research, heat-map visualization, and analyst labeling.
+This document records the current **MITRE ATLAS organizer taxonomy** used by Safeguard LLM for prompt research, heat-map visualization, and analyst labeling.
 
 The taxonomy is now driven by the accumulated test corpus rather than the earlier smaller candidate set.
 

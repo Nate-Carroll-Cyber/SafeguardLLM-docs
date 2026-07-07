@@ -1,8 +1,8 @@
-### Counter‑Spy.ai: STRIDE + MITRE ATLAS Threat Model
+### Safeguard LLM: STRIDE + MITRE ATLAS Threat Model
 
 #### Executive Summary for the CISO
 
-Counter‑Spy.ai is well fortified against direct front‑door attacks such as prompt injection and service denial. The primary residual risks are at the edges:
+Safeguard LLM is well fortified against direct front‑door attacks such as prompt injection and service denial. The primary residual risks are at the edges:
 
 1. **Output Edge** — advanced format shifting to bypass redaction.  
 2. **Code Edge** — supply‑chain compromises silently degrading the local firewall.  
@@ -17,7 +17,7 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 - **MITRE ATLAS Mapping:** `AML.TA0003` (Initial Access) / `AML.T0043` (Craft Adversarial Data)  
 - **Target Component:** Human‑in‑the‑Loop (HITL) Queue / API Gateway  
 - **Description:** Attackers may spoof IPs or rotate ephemeral authenticated sessions to make automated traffic appear organic and bypass rate limits.  
-- **Proposed Mitigation:** Implement behavioral fingerprinting (typing cadence, interaction speed) and require CAPTCHA/challenge responses for sessions that trigger the `Suspicious` entropy band (`Entropy > 3.6` and at or below the configured adversarial cutoff) before entering HITL.
+- **Proposed Mitigation:** Implement behavioral fingerprinting (typing cadence, interaction speed) and require CAPTCHA/challenge responses for sessions that trigger the `Suspicious` entropy band (`Entropy > 3.8` and at or below the configured adversarial cutoff) before entering HITL.
 
 ---
 
@@ -43,7 +43,7 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 
 #### 4. Information Disclosure (Unauthorized Exposure)
 - **Threat:** **Canary Token / PII Leakage via Format Shifting**  
-- **MITRE ATLAS Mapping:** `AML.TA0010` (Exfiltration) / `AML.T0024` (Exfiltration via Cyber Means) / `AML.T0054` (LLM Meta Prompt Extraction)  
+- **MITRE ATLAS Mapping:** `TA0009` (Exfiltration) / `T0058` (Exfiltration via Tool) / legacy `AML.T0056` (Extract LLM System Prompt)
 - **Target Component:** Output Sanitization Layer  
 - **Description:** The LLM may be induced to output sensitive values encoded (Base64, hex, tables) that bypass exact‑match sanitizers.  
 - **Proposed Mitigation:** Apply sliding‑window entropy analysis and regex filtering to model outputs as well as inputs. Intercept outputs with abnormally high entropy or encoding patterns. Replace any explicit canary token references with a redacted placeholder such as `[REDACTED_CANARY_TOKEN]`.
@@ -61,7 +61,7 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 
 #### 6. Elevation of Privilege (Unauthorized Capabilities)
 - **Threat:** **System Prompt Override (Persona Hijacking / Jailbreak)**  
-- **MITRE ATLAS Mapping:** `AML.TA0004` (Execution) / `AML.T0051` (Prompt Injection) / `AML.T0042` (Jailbreak) / `AML.T0053` (LLM Manipulation)  
+- **MITRE ATLAS Mapping:** `TA0005` (Execution) / `T0051` (Prompt Injection) / `T0054` (LLM Jailbreak)
 - **Target Component:** Backend `/v1/intercept` gateway, OpenAI-compatible safeguard judge, and downstream responder
 - **Description:** Attackers attempt to override the model persona using jailbreak patterns to bypass forbidden‑topic constraints.  
 - **Proposed Mitigation:** Do not rely solely on the primary model. Use prompt wrapping (re‑assert constraints at the end of the prompt) and route outputs through a secondary evaluator model that classifies whether the primary model violated guardrails.
@@ -82,7 +82,7 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 
 #### 8. Information Disclosure / Tampering (Insider Threat)
 - **Threat:** **Golden Set Poisoning & Unauthorized Exports via Valid Accounts**  
-- **MITRE ATLAS Mapping:** `AML.T0012` (Valid Accounts) / `AML.T0039` (Data Poisoning)  
+- **MITRE ATLAS Mapping:** `TA0006` (Privilege Escalation) / `T0020` (Poison Training Data)
 - **Target Component:** Analyst Operations Dashboard / Fine‑Tuning Pipeline  
 - **Description:** Malicious insiders may promote adversarial prompts into the Golden Set or scrape audit logs for sensitive content, enabling poisoning of future models.  
 - **Proposed Mitigation:**  
@@ -109,7 +109,7 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 ---
 
 ### Appendix — Key Operational Thresholds and Controls
-- **Entropy bands:** `Allowed <= 3.6`, `Suspicious > 3.6 and <= configured Entropy Threshold`, `Adversarial > configured Entropy Threshold`
+- **Entropy bands:** `Allowed <= 3.8`, `Suspicious > 3.8 and <= configured Entropy Threshold`, `Adversarial > configured Entropy Threshold`
 - **Sanitization order:** `Normalize (NFKC)` → `Strip non-printables` → `Local sanitizer/entropy/regex checks` → `OpenAI-compatible safeguard judge` → `Downstream responder` → `Output filter`
 - **Audit logging:** Current Beta audit records persist sanitized prompts, detection metadata, review state, and backend telemetry with Firestore RBAC. Dual raw/normalized records and immutable admin audit metadata are planned production controls, not current repo functionality.
 
