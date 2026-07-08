@@ -1,0 +1,201 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-07-08T00:00:00Z",
+    "component": {
+      "type": "application",
+      "name": "Safeguard LLM",
+      "version": "2.5",
+      "description": "Adversary-Aware Prompt Firewall & Forwarding Gateway (counter-spy). Secure GenAI control-plane that mediates all LLM interactions before inference (Shield-and-Sword pattern).",
+      "properties": [
+        {"name": "internalName", "value": "counter-spy"},
+        {"name": "status", "value": "Beta"},
+        {"name": "classification", "value": "Proprietary / AppSec Engineering"},
+        {"name": "safeguardEffectivePrompt.sha256", "value": "590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0"}
+      ]
+    },
+    "authors": [{"name": "AppSec Engineering (Nate-Carroll-Cyber)"}],
+    "properties": [
+      {"name": "regulatory.euAiAct", "value": "High-risk / GPAI-adjacent (deployer duties, Annex IV, 10-yr retention)"},
+      {"name": "regulatory.caAB2013", "value": "Applies to Golden Set/DPO + core seed corpus; third-party model data UNVERIFIED"},
+      {"name": "regulatory.coSB24205", "value": "Conditional; language-based over-block = algorithmic-discrimination candidate"}
+    ]
+  },
+  "components": [
+    {
+      "type": "machine-learning-model",
+      "name": "gpt-oss-safeguard-20b",
+      "version": "unknown",
+      "description": "Safeguard judge (control-plane decision model), LM_STUDIO preset. Returns JSON verdict CLEAN|SUSPICIOUS|ADVERSARIAL.",
+      "supplier": {"name": "Local (LM Studio host 192.168.0.183:1234)"},
+      "properties": [
+        {"name": "role", "value": "safeguard-judge"},
+        {"name": "interface", "value": "OpenAI-compatible /v1/chat/completions"},
+        {"name": "weights", "value": "third-party/local; UNVERIFIED (no checksum)"},
+        {"name": "inferenceConfig", "value": "UNVERIFIED (temperature/top_p undocumented)"}
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "gpt-5.4-mini",
+      "version": "unknown",
+      "description": "Safeguard judge (control-plane decision model), OPENAI preset default.",
+      "supplier": {"name": "OpenAI"},
+      "externalReferences": [{"type": "distribution", "url": "https://api.openai.com/v1"}],
+      "properties": [
+        {"name": "role", "value": "safeguard-judge"},
+        {"name": "weights", "value": "provider-hosted/opaque; UNVERIFIED"},
+        {"name": "trainingDataSummary", "value": "UNVERIFIED (obtain from OpenAI AB 2013 disclosure)"}
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "gemini-2.5-flash",
+      "version": "unknown",
+      "description": "Downstream responder (inference-plane) example model when RESPONDER_PROVIDER=gemini.",
+      "supplier": {"name": "Google"},
+      "properties": [
+        {"name": "role", "value": "downstream-responder"},
+        {"name": "weights", "value": "provider-hosted/opaque; UNVERIFIED"},
+        {"name": "trainingDataSummary", "value": "UNVERIFIED (obtain from Google AB 2013 disclosure)"},
+        {"name": "note", "value": "Responder is vendor-neutral/pluggable; production model not fixed"}
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "nomic-embed-text",
+      "version": "unknown",
+      "description": "Embedding model for instruction-similarity monitor. 768-dim vectors. Local/private-network only; public embedding endpoints blocked.",
+      "supplier": {"name": "Nomic (served via Ollama 0.23.2, host 192.168.0.183:11434)"},
+      "properties": [
+        {"name": "role", "value": "embedding"},
+        {"name": "vectorDimension", "value": "768"},
+        {"name": "egressPolicy", "value": "local/private-network only"},
+        {"name": "weights", "value": "open-weight; UNVERIFIED (no checksum in repo)"}
+      ]
+    },
+    {
+      "type": "data",
+      "name": "core pgvector seed corpus",
+      "version": "core-2026-05-10-latest",
+      "description": "Reviewed-ADVERSARIAL instruction fingerprints/embeddings. 319 records / 611 chunks / 768-dim. Source controlled-prompt-review.",
+      "hashes": [
+        {"alg": "SHA-256", "content": "06cb8e18fcebd73ea2933d7a1c3e71979ff8a396fd8531617a2a1509297e5cd5"},
+        {"alg": "SHA-256", "content": "2a98e22110240fe87582865bf5ebace17d97074414c06ef495c53239e295465b"}
+      ],
+      "properties": [
+        {"name": "recordCount", "value": "319"},
+        {"name": "chunkCount", "value": "611"},
+        {"name": "pii", "value": "adversarial prompt text; redacted; SHA-256 hashes stored not raw plaintext"},
+        {"name": "synthetic", "value": "false"},
+        {"name": "integrity", "value": "VERIFIED"}
+      ]
+    },
+    {
+      "type": "data",
+      "name": "MITRE ATLAS test corpus",
+      "version": "unknown",
+      "description": "569 prompts across 97 sections driving 16-node ATLAS organizer taxonomy for labeling/heat-maps/exports.",
+      "properties": [
+        {"name": "promptCount", "value": "569"},
+        {"name": "taxonomyLicense", "value": "MITRE ATLAS"},
+        {"name": "integrity", "value": "UNVERIFIED (no marker documented)"}
+      ]
+    },
+    {
+      "type": "data",
+      "name": "Golden Set / DPO fine-tuning dataset",
+      "version": "unknown",
+      "description": "Direct Preference Optimization dataset built via Promote-to-KB. Captures prompt, AI response, and required Rejected Reason. Only sanitized/redacted prompts persisted.",
+      "properties": [
+        {"name": "synthetic", "value": "false"},
+        {"name": "pii", "value": "redacted only"},
+        {"name": "integrity", "value": "UNVERIFIED (export exists; no checksum documented)"}
+      ]
+    },
+    {
+      "type": "library",
+      "name": "react",
+      "version": "~19.0.4",
+      "properties": [{"name": "cve", "value": "Pinned for CVE-2025-55182 & CVE-2026-23864"}]
+    },
+    {
+      "type": "library",
+      "name": "firebase",
+      "version": "^12.12.0",
+      "properties": [{"name": "cve", "value": "@firebase/auth 1.13.0 mitigates CVE-2024-11023"}]
+    },
+    {
+      "type": "library",
+      "name": "vite",
+      "version": "^8.0.5",
+      "properties": [{"name": "cve", "value": "Mitigates CVE-2026-39363, GHSA-v2wj-q39q-566r, GHSA-4w7w-66w2-5vf9"}]
+    },
+    {"type": "library", "name": "express", "version": "^5.2.1"},
+    {"type": "library", "name": "zod", "version": "^4.3.6"},
+    {"type": "library", "name": "pg", "version": "^8.20.0"},
+    {"type": "library", "name": "pgvector", "version": "^0.2.1"},
+    {"type": "library", "name": "@translated/lara", "version": "^1.9.0"},
+    {
+      "type": "library",
+      "name": "dotenv",
+      "version": "^17.2.3",
+      "properties": [{"name": "risk", "value": "Planned migration to AWS Secrets Manager"}]
+    },
+    {
+      "type": "library",
+      "name": "react-markdown",
+      "version": "^10.1.0",
+      "properties": [{"name": "note", "value": "No rehype-raw; residual XSS relies on library default"}]
+    },
+    {
+      "type": "library",
+      "name": "fast-uri",
+      "version": "3.1.2",
+      "properties": [{"name": "cve", "value": "Patched GHSA-q3j6-qgpj-74h6, GHSA-v39h-62p7-jpjc (transitive)"}]
+    },
+    {
+      "type": "container",
+      "name": "pgvector/pgvector",
+      "version": "pg16",
+      "description": "PostgreSQL 16 with vector extension 0.8.2. tmpfs-backed in demo.",
+      "properties": [{"name": "runtimeUser", "value": "non-root node via su-exec 0.2-r3"}]
+    }
+  ],
+  "services": [
+    {
+      "name": "counter-spy-backend",
+      "endpoints": ["/v1/intercept", "/v1/translate", "/v1/instruction-monitor/reviewed-adversarial", "/v1/ctf/sam-spade/*", "/healthz"],
+      "authenticated": true,
+      "x-trust-boundary": "Owns provider secrets; browser cannot override provider config",
+      "data": [{"classification": "redacted-prompts + SHA-256 hashes"}],
+      "properties": [
+        {"name": "auth", "value": "shared static bearer token (INTERCEPT_BEARER_TOKEN); JWT/OIDC NOT implemented"},
+        {"name": "port", "value": "18080"}
+      ]
+    },
+    {
+      "name": "Google Firestore",
+      "x-trust-boundary": "Google Cloud US-West2",
+      "data": [{"classification": "audit logs, user profiles, system/governance config, knowledge base, golden set"}],
+      "authenticated": true,
+      "properties": [{"name": "rules", "value": "firestore.rules — no client role self-elevation; admin-only config/system + knowledge_base reads"}]
+    },
+    {
+      "name": "Lara Translate",
+      "endpoints": ["https://api.laratranslate.com"],
+      "x-trust-boundary": "backend-only egress; fails closed if creds absent"
+    }
+  ],
+  "compositions": [
+    {
+      "aggregate": "incomplete",
+      "assemblies": ["Safeguard LLM"],
+      "properties": [
+        {"name": "note", "value": "Third-party model weights and their training-data summaries are UNVERIFIED/opaque. Production auth, AWS Bedrock wiring, and bias testing are undocumented target-state."}
+      ]
+    }
+  ]
+}
