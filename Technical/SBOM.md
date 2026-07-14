@@ -2,7 +2,7 @@
 
 **Project Name:** Safeguard LLM
 **Version:** v2.5
-**Date Generated:** 2026-05-09
+**Date Generated:** 2026-07-14
 **Compliance Level:** Internal Security Governance
 
 ## 📦 Core Dependencies
@@ -69,6 +69,8 @@ These services are not npm dependencies and are not bundled into the Safeguard L
 | `typescript` | `~5.8.2` | Static Type Checking |
 | `tailwindcss` | `^4.1.14` | Utility-first CSS Framework |
 | `tsx` | `^4.21.0` | TypeScript Execution Engine |
+| `@types/express` | `^5.0.0` | TypeScript declarations for the Express backend |
+| `@types/node` | `^22.14.0` | TypeScript declarations for the Node.js backend and build tooling |
 | `@types/pg` | `^8.20.0` | Type definitions for the PostgreSQL client |
 | `autoprefixer` | `^10.4.21` | CSS Vendor Prefixing |
 | `shadcn` | `^4.2.0` | UI Component CLI (Moved to devDependencies) |
@@ -108,7 +110,7 @@ These packages were observed during a one-time `npx firebase-tools` attempt to d
 - **Responder and Safeguard Usage Telemetry & Gating**: When the downstream responder returns OpenAI-compatible `usage`, the backend preserves prompt/completion/total token counts. For safeguard-only local passthrough, the backend also extracts LM Studio/OpenAI-compatible safeguard judge usage (`prompt_tokens`/`completion_tokens`/`total_tokens` and Responses-style `input_tokens`/`output_tokens`) so audit records can still show token consumption. The frontend can combine either token source with an operator-configured max context window to estimate context consumption, and now also uses that value as a pre-submit gate in Analyst Chat and the Prompt Playground.
 - **Downstream Responder Runtime View**: The dedicated Responder tab surfaces provider, backend health, model/base URL, responder key source, context-window configuration, last forwarded prompt hash, split latency telemetry, token usage, and output-sanitization flags without exposing guardrail toggles on the responder surface. Operators can disable responder routing for safeguard-only local passthrough while still preserving safeguard latency and verdict telemetry.
 - **Prompt Role Separation**: System configuration distinguishes the editable Safeguard Effective Prompt from responder prompt configuration for review and drift management. Protected backend execution forwards the current Safeguard Effective Prompt verbatim to the safeguard judge while rejecting browser-supplied responder prompt overrides.
-- **Prompt Drift Detection**: The UI computes SHA-256 fingerprints for the recommended effective safeguard prompt and the active effective safeguard prompt so configuration drift can be identified quickly during validation and incident response. The current promoted recommended effective prompt is hardcoded into `DEFAULT_SYSTEM_CONFIG.safeguardEffectivePromptOverride`; empty legacy values and previous app-generated baseline prompt variants normalize back to that promoted default on startup. Custom non-empty prompt overrides are preserved and continue to appear as drift. The current promoted recommended effective prompt hash and aligned current safeguard prompt hash are `590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0`.
+- **Prompt Drift Detection**: The UI computes SHA-256 fingerprints for the recommended and active Safeguard Effective Prompts with `crypto.subtle.digest`. An aligned running UI reports `590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0`; this is a runtime-computed value, not a literal build-time assertion independently verifiable from source alone. Empty legacy values and prior app-generated baseline variants normalize to the promoted default, while custom non-empty values remain visible as drift.
 - **Admin-Only Internal Guardrails**: Firestore rules now prevent users from self-assigning elevated roles, reserve `config/system` and `knowledge_base` reads for admins, and keep governance sync (`config/governance`) separately readable for authenticated sessions.
 - **Safeguard Runtime Verdict Contract**: The safeguard layer now relies on one structured runtime contract: `{"verdict":"CLEAN|SUSPICIOUS|ADVERSARIAL","analystReasoning":"brief reason"}`. Legacy decision-shaped payloads (`ALLOW_AND_FORWARD`, `BLOCK`, `QUEUE_FOR_REVIEW`, `FAIL_SECURE`), malformed JSON, or non-JSON safeguard outputs fail secure to `SUSPICIOUS` / `QUEUED` and are logged by schema shape rather than being normalized into a permissive allow path.
 - **Safeguard Timeout Fail-Secure**: Backend safeguard calls use `AbortController` with runtime-validated `SAFEGUARDS_TIMEOUT_MS` (default 30s, max 120s). Timeout, missing LM Studio API token, rejected safeguard API key, or other safeguard provider failure returns structured `SHIELD_ERROR` telemetry with `SAFEGUARD_TIMEOUT` or `SAFEGUARD_ERROR` plus `FAIL_SECURE`; the frontend also aborts `/v1/intercept` after 45s, marks the audit event `PENDING_REVIEW`, and activates Global System Pause rather than falling back to local inference.

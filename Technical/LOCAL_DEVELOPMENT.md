@@ -56,7 +56,7 @@ Current promoted recommended effective safeguard prompt hash:
 590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0
 ```
 
-The current System Configuration safeguard prompt hash should match `590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0` when the active prompt is aligned to the recommended baseline. The default System Configuration hardcodes that prompt in `safeguardEffectivePromptOverride`; empty legacy/local values and previous app-generated baseline prompts are normalized back to the hardcoded promoted default on startup. This keeps first-open and upgraded local-review sessions aligned without requiring the user to click Reset, while preserving genuinely custom non-empty prompt overrides as drift. The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. Provider safeguard calls fail closed if direct `/v1/intercept` callers omit `safeguardEffectivePrompt`; there is no backend-authored prompt fallback.
+The running System Configuration view should report `590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0` when the active prompt is aligned to the recommended baseline. The UI computes this value at runtime with `crypto.subtle.digest`; the source does not contain an independent build-time assertion proving that literal hash. The default System Configuration hardcodes the prompt text in `safeguardEffectivePromptOverride`; empty legacy/local values and previous app-generated baseline prompts normalize back to that promoted default on startup. The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. Provider safeguard calls fail closed if direct `/v1/intercept` callers omit `safeguardEffectivePrompt`; there is no backend-authored prompt fallback.
 
 ### Split Runtime Latency
 
@@ -217,11 +217,20 @@ Useful instruction-monitor env vars:
 
 - `INSTRUCTION_MONITOR_ENABLED`
 - `INSTRUCTION_MONITOR_DATABASE_URL`
+- `DATABASE_URL` (fallback when `INSTRUCTION_MONITOR_DATABASE_URL` is unset)
 - `INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS`
+- `INSTRUCTION_MONITOR_COMPARE_LIMIT` (default `10`)
+- `INSTRUCTION_MONITOR_SIMILARITY_THRESHOLD` (default `0.78`)
+- `INSTRUCTION_MONITOR_HAMMING_THRESHOLD` (default `12`)
+- `INSTRUCTION_MONITOR_CHUNK_QUERY_CONCURRENCY` (default `4`)
 - `INSTRUCTION_MONITOR_EMBEDDINGS_ENABLED`
 - `INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL`
 - `INSTRUCTION_MONITOR_EMBEDDINGS_API_KEY`
 - `INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID`
+- `INSTRUCTION_MONITOR_EMBEDDINGS_TIMEOUT_MS` (default `15000`)
+- `INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS` (backend default `8`; Docker demo default `4`)
+- `INSTRUCTION_MONITOR_SEED_CORE_ON_START` (entrypoint default `false`; Docker demo default `true`)
+- `INSTRUCTION_MONITOR_SEED_CORE_PATH` (default `/app/seeds/pgvector/core.json`)
 
 ### Core pgvector Seed Snapshot
 

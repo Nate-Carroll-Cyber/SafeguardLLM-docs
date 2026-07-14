@@ -16,4 +16,4 @@ Reference docs:
 - `SAM_SPADE_CTF_INTEGRATION.md` - Sam Spade CTF integration architecture.
 
 Notes:
-- These files are mirrored from their existing locations to support a cleaner documentation taxonomy while preserving legacy paths.
+- This folder is the canonical and only location for the technical documents listed above. The similarly named root `MITRE_ATLAS_Mapping.md` is a separate defensive-capability mapping, not a mirror of `Technical/MITRE_ATLAS_MAPPING.md`.

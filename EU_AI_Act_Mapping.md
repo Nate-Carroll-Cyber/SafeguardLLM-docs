@@ -35,6 +35,6 @@ If an enterprise deploys an LLM or downstream responder API without an intermedi
 #### **5. Article 9: Risk Management System**
 *Deployers must establish a continuous iterative process to identify, estimate, and evaluate risks that the AI system may pose to health, safety, or fundamental rights.*
 * **Dynamic Guardrails:** Administrators can toggle security features such as Blocked Keywords, Forbidden Phrases, entropy filtering, obfuscation detection, regex rules, and safeguard LLM enforcement on the fly. This allows the organization to dynamically adjust the AI’s risk posture as new threats are identified.
-* **Forbidden Phrases and Policy Category Enforcement:** Operator-managed forbidden phrases are enforced locally, while the visible Firewall Prompt carries baseline category and gibberish/obfuscation guidance for the OpenAI-compatible safeguard judge. This mitigates the risk of the downstream responder violating fundamental rights or generating harmful misinformation.
+* **Forbidden Phrases and Policy Category Enforcement:** Operator-managed forbidden phrases are enforced locally, while the editable Safeguard Effective Prompt carries baseline category, few-shot, and gibberish/obfuscation guidance for the OpenAI-compatible safeguard judge. This mitigates the risk of the downstream responder violating fundamental rights or generating harmful misinformation.
 
 ---

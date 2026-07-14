@@ -110,7 +110,7 @@ Thresholds can be adjusted in the **Knowledge Base -> System Configuration** sec
 | Guardrail | Suspicious Threshold | Adversarial Threshold | Description |
 | :--- | :--- | :--- | :--- |
 | **Entropy** | > 3.8 | Configured Entropy Threshold | Detects obfuscated payloads and borderline high-entropy prompts. |
-| **Syntactic Complexity** | 65 | 90 | Detects instruction stacking and probing. |
+| **Syntactic Complexity** | >= configured threshold (default 65) | >= 90 | Detects instruction stacking and probing; the configured threshold is tunable from 40 through 90. |
 
 > [!NOTE]
 > If you notice a high False Positive Rate (FPR), consider raising the configured Entropy Threshold. If you are missing "jailbreak" attempts, lower the Syntactic Complexity threshold to 40.
@@ -142,8 +142,11 @@ Not every flagged log is suitable for the Golden Set. To ensure high-quality tra
 | `ReDoS_ATTEMPT_DETECTED` | Input caused the sanitizer to exceed the 1,000ms fail-secure latency threshold. | **Critical Block.** Likely a DoS attack; Global System Pause should activate. |
 | `TOKEN_DILUTION` | High entropy detected in a specific 35-char window. | Inspect for hidden shellcode or encoded payloads. |
 | `SYNTACTIC_PROBE` | High density of imperative constraints detected. | Check for "Ignore previous instructions" patterns. |
-| `SENSITIVE_DATA_EXPOSURE` | Redactor identified sensitive placeholders, credentials, or personal data that should not proceed to gameplay/responder inference. | Ensure redaction was successful; keep the request blocked or queued when sensitive content remains material. |
-| `REGEX_BYPASS` | Input matched a known injection pattern. | Review the specific regex rule triggered in the log. |
+| `EMAIL`, `PHONE`, `SSN`, `IP_ADDRESS`, `CREDIT_CARD` | The sanitizer identified and redacted a supported personal-data pattern. | Confirm the persisted prompt contains only the expected redaction placeholders. |
+| `AWS_KEY`, `SECRET_KEY`, `PRIVATE_KEY`, `LLM_API_KEY`, `JWT`, `CANARY_TOKEN` | The sanitizer identified secret or credential material. `CANARY_TOKEN` also produces backend-side exfiltration evidence. | Keep high-risk secret disclosures blocked and follow the credential-rotation or incident-response procedure. |
+| `REGEX_MATCH` | Input matched an active configured policy regex. | Review the matching rule and sanitized evidence; do not infer a bypass from this flag alone. |
+| `BLOCKED_KEYWORD` | Input matched an active blocked keyword. | Confirm the keyword is still appropriate and review surrounding context. |
+| `POLICY_VIOLATION` | One or more blocked-keyword, forbidden-topic/phrase, or regex controls matched. | Treat as the shared policy-hit signal and review the underlying specific flags. |
 | `INSTRUCTION_SIMILARITY_MATCH` | Backend instruction memory found an exact, loose-hash, SimHash, or semantic match before responder forwarding. Fingerprint matches against stored adversarial records block; semantic matches queue as suspicious review. | For semantic matches, review the matched prompt family and decide whether to label or promote it. For adversarial fingerprint matches, verify the stored hash lineage and leave the block in place unless the source label was wrong. |
 
 Similarity Monitor reason labels map to specific backend criteria. `Exact Sha256` and `Loose Sha256` are strict equality checks against stored hashes. `Simhash 2gram`, `Simhash 3gram`, and `Simhash 4gram` indicate structural fingerprint proximity within the configured Hamming threshold (`<= 12` by default). `Embedding`, `Chunk Embedding`, `Attention Pool`, and `Sandwich Delta` are semantic/chunk signals and should be treated as review evidence unless a later deterministic rule is promoted. The Last Execution Results rail shows only the most recent run; use Audit Logs -> Prompt Details to review persisted Similarity Monitor evidence from older entries. Use the `Lookup` action beside a stored hash to open the protected Instruction Match view, which shows the source record, strict/loose hashes, stored verdict, stored prompt preview, and chunk previews for comparison.
@@ -156,11 +159,13 @@ Admins can disable the Similarity Monitor under Active Guardrails when demonstra
 
 When a prompt is intercepted or blocked, the system returns a standardized message to the user. Analysts should not deviate from these standards to avoid leaking internal security logic.
 
-| Scenario | User-Facing Message | Intent |
-| :--- | :--- | :--- |
-| **Adversarial Block** | "Security Policy Violation: Your request contains patterns that violate our safety guidelines." | Firm rejection; no technical details provided. |
-| **Suspicious Intercept** | "Technical Review Required: Your request has been flagged for manual security audit." | Neutral; informs the user of the delay without confirming a "hit." |
-| **PII Redaction** | "[REDACTED] detected. Your prompt has been sanitized for your protection." | Helpful; reinforces data privacy culture. |
+| Scenario | User-Facing Message |
+| :--- | :--- |
+| **Global System Pause** | "SYSTEM HALTED: All automated inference is currently paused. Your request has been routed to the manual review queue." |
+| **HITL Review** | "PENDING REVIEW: Your request has been flagged for manual review by a security analyst. Please wait." |
+| **Adversarial Detection** | "ADVERSARIAL DETECTION TRIGGERED: This request violates security governance policies. High entropy or injection patterns detected. Action logged and escalated." |
+| **Policy Violation** | "POLICY VIOLATION DETECTED: This request matched blocked keywords, forbidden topics, or policy regex rules. Action logged and escalated." |
+| **Suspicious Detection** | "SUSPICIOUS DETECTION TRIGGERED: This request violates security governance policies. Blocked keywords, topics, or high entropy detected. Action logged and escalated." |
 
 ---
 

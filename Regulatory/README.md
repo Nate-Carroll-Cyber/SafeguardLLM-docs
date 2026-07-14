@@ -9,4 +9,5 @@ Contents:
 - `Model_Card.md`
 
 Notes:
-- These files are mirrored from the existing primary documentation paths so the repository can maintain a consistent structure alongside the docs-only staging repo.
+- `EU_AI_Act_Mapping.md`, `Threat_Model.md`, and `Model_Card.md` are maintained as byte-identical mirrors of their root-level counterparts.
+- `ANALYST_GUIDE.md` is canonical in this folder and has no root-level mirror.
