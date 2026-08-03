@@ -11,7 +11,6 @@ Safeguard LLM decouples adversarial defense from response generation by enforcin
 > Govern Every Prompt. Question Every Answer.
 
 ## 📚 Documentation
-- [Current Session Handoff](./Technical/SESSION_HANDOFF.md) - Compact current-state summary for the latest safeguard, detector, Feature Pressure, Metrics, and local Docker work.
 - [Technical Architecture & Specifications](./Technical/ARCHITECTURE.md) - Deep dive into the Shield-and-Sword pattern and heuristics.
 - [Analyst & Administrator Operations Guide](./OPERATIONS_GUIDE.MD) - Standard Operating Procedures for SOC personnel.
 - [Adversarial Prompt Analysis Plan](./Technical/ADVERSARIAL_PROMPT_ANALYSIS.md) - Research plan for taxonomy, trend analysis, detection effectiveness, and failure-case reporting.
