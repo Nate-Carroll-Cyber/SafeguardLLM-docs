@@ -1,0 +1,290 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Layer 21 - Backup account. cmk/backup and the central vault.
+
+  DEPLOY TO THE BACKUP ACCOUNT. Separate from Log Archive on purpose: audit data
+  must survive tampering, recovery points must survive destruction. One account
+  holding both is a single target whose compromise removes the record of an
+  incident and the ability to recover from it.
+
+  Vault Lock in COMPLIANCE mode becomes irreversible after the cooling-off
+  period. Past that point no principal - including root and AWS Support - can
+  shorten retention or delete a recovery point.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  ApplicationId:
+    Type: String
+    Default: genai-workload
+  CostCenter:
+    Type: String
+  Owner:
+    Type: String
+  OrganizationId:
+    Type: String
+    AllowedPattern: "^o-[a-z0-9]{10,32}$"
+  MinRetentionDays:
+    Type: Number
+    Default: 35
+    MinValue: 1
+  MaxRetentionDays:
+    Type: Number
+    Default: 400
+  ChangeableForDays:
+    Type: Number
+    Default: 3
+    MinValue: 3
+    Description: >
+      Cooling-off window. The lock is reversible for this many days and
+      permanent afterward. Minimum 3; use it in non-prod, raise it in prod only
+      if the retention numbers are still in review.
+  VaultLockEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Leave false until the retention figures are settled. Enabling starts a
+      countdown to permanence, and MinRetentionDays cannot be lowered afterward.
+
+Conditions:
+  UseVaultLock: !Equals [!Ref VaultLockEnabled, "true"]
+
+Resources:
+
+  # ==========================================================================
+  # cmk/backup
+  #
+  # Workload and deployment principals are absent. A compromise of either cannot
+  # decrypt a recovery point, which is what makes cross-account copy meaningful
+  # rather than cosmetic.
+  # ==========================================================================
+  BackupKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "${ApplicationId} recovery points"
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+          # Cross-account copy needs the source account able to re-encrypt into
+          # this key. CreateGrant is required by AWS Backup itself.
+          - Sid: AllowOrgBackupCopy
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:ReEncrypt*
+              - kms:DescribeKey
+              - kms:CreateGrant
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrganizationId
+                kms:ViaService: !Sub "backup.${AWS::Region}.amazonaws.com"
+
+          - Sid: DenyKeyDestruction
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - kms:ScheduleKeyDeletion
+              - kms:DisableKey
+              - kms:DisableKeyRotation
+            Resource: "*"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: restricted }
+        - { Key: owner, Value: !Ref Owner }
+
+  BackupKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ApplicationId}/${Environment}/backup"
+      TargetKeyId: !Ref BackupKey
+
+  # ==========================================================================
+  # Central vault
+  # ==========================================================================
+  CentralVault:
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Sub "${ApplicationId}-${Environment}-central"
+      EncryptionKeyArn: !GetAtt BackupKey.Arn
+      # LockConfiguration with ChangeableForDays is compliance mode. Omitting
+      # ChangeableForDays would give governance mode, which a sufficiently
+      # privileged principal can override - and that principal is exactly the
+      # one an attacker would obtain.
+      LockConfiguration: !If
+        - UseVaultLock
+        - MinRetentionDays: !Ref MinRetentionDays
+          MaxRetentionDays: !Ref MaxRetentionDays
+          ChangeableForDays: !Ref ChangeableForDays
+        - !Ref AWS::NoValue
+      AccessPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Denies deletion to everyone, including root. The one carve-out is
+          # PutBackupVaultLockConfiguration for the deployment role: without it
+          # this policy blocks the very operation that arms the lock, and the
+          # documented "re-run with VaultLockEnabled=true" step fails against a
+          # policy installed by the first run.
+          #
+          # The carve-out is safe in one direction only. Compliance mode cannot
+          # be weakened or removed once the cooling-off window passes, so the
+          # deployment role can arm the lock and can never disarm it.
+          - Sid: DenyRecoveryPointDeletion
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - backup:DeleteRecoveryPoint
+              - backup:UpdateRecoveryPointLifecycle
+              - backup:DeleteBackupVault
+              - backup:PutBackupVaultAccessPolicy
+              - backup:DeleteBackupVaultAccessPolicy
+            Resource: "*"
+          - Sid: DenyLockConfigurationExceptDeployment
+            Effect: Deny
+            Principal: "*"
+            Action: backup:PutBackupVaultLockConfiguration
+            Resource: "*"
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-CfnServiceRole"
+          - Sid: AllowOrgCopyIn
+            Effect: Allow
+            Principal: "*"
+            Action: backup:CopyIntoBackupVault
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrganizationId
+      BackupVaultTags:
+        costCenter: !Ref CostCenter
+        environment: !Ref Environment
+        applicationId: !Ref ApplicationId
+        dataClassification: restricted
+        owner: !Ref Owner
+
+  # ==========================================================================
+  # Restore-test role
+  #
+  # Quarterly restore exercise (spec 13.3). An untested backup is an assumption -
+  # the measured RTO is what belongs in the recovery statement, and producing it
+  # is what surfaces the endpoint-swap and proxy-retarget steps that nobody
+  # writes down before the first real restore.
+  #
+  # Restores into an isolated test account, never into the workload account.
+  # ==========================================================================
+  RestoreTestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-RestoreTestRole"
+      Description: Quarterly restore verification
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: backup.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+      Policies:
+        - PolicyName: restore-key-use
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:CreateGrant
+                Resource: !GetAtt BackupKey.Arn
+              # Read-only against the vault. A restore test must not be able to
+              # remove the recovery point it is testing.
+              - Effect: Deny
+                Action:
+                  - backup:DeleteRecoveryPoint
+                  - backup:UpdateRecoveryPointLifecycle
+                Resource: "*"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: restricted }
+        - { Key: owner, Value: !Ref Owner }
+
+  # Fires the exercise. It does not perform it - a restore that runs
+  # unattended proves the API works, not that the data is usable. The
+  # notification is the prompt for a human to run the integrity checks and
+  # record the measured RTO.
+  RestoreTestSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ApplicationId}-${Environment}-restore-test"
+      Description: Quarterly restore exercise reminder
+      ScheduleExpression: "cron(0 14 1 1,4,7,10 ? *)"
+      State: ENABLED
+      Targets:
+        - Id: notify
+          Arn: !Ref RestoreTestTopic
+
+  RestoreTestTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ApplicationId}-${Environment}-restore-test"
+      KmsMasterKeyId: !Ref BackupKey
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: restricted }
+        - { Key: owner, Value: !Ref Owner }
+
+  RestoreTestTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref RestoreTestTopic]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref RestoreTestTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+Outputs:
+  BackupKeyArn:
+    Value: !GetAtt BackupKey.Arn
+    Description: Pass to the workload account backup plan as the copy destination key
+  CentralVaultArn:
+    Value: !GetAtt CentralVault.BackupVaultArn
+    Description: Copy destination for workload-account backup plans
+  CentralVaultName:
+    Value: !Ref CentralVault
+  RestoreTestRoleArn:
+    Value: !GetAtt RestoreTestRole.Arn
+  VaultLockState:
+    Value: !If [UseVaultLock, "compliance-mode-armed", "unlocked"]
+    Description: Once compliance mode passes the cooling-off window it is permanent

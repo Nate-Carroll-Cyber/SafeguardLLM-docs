@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Layer 22b - Deployment roles. DEPLOY INTO EACH TARGET ACCOUNT (workload, log
+  archive, backup, security).
+
+  A role must be created in the account it acts on, so this half cannot live in
+  the Shared Services stack. The names here are referenced by policies in layers
+  02, 06, and by SCP 10 in layer 23 - renaming breaks those silently.
+
+  The separation: CfnDeploymentRole can start a stack operation and pass
+  CfnServiceRole, and holds no service permissions itself. CfnServiceRole holds
+  the mutation permissions and can only be exercised by CloudFormation. Neither
+  alone can call an arbitrary API.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  ApplicationId:
+    Type: String
+    Default: genai-workload
+  CostCenter:
+    Type: String
+  Owner:
+    Type: String
+  SharedServicesAccountId:
+    Type: String
+    AllowedPattern: "^[0-9]{12}$"
+  DeploymentExternalId:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+  BoundaryPolicyName:
+    Type: String
+    Default: DeploymentBoundary
+
+Resources:
+
+  # ==========================================================================
+  # Local copy of the deployment boundary
+  #
+  # A permissions boundary is an IAM policy and must exist in the same account as
+  # the role it bounds. This mirrors the Shared Services version; the two must be
+  # kept in sync, which is a real maintenance cost and the reason not to make the
+  # boundary elaborate.
+  # ==========================================================================
+  DeploymentBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${ApplicationId}-${Environment}-${BoundaryPolicyName}"
+      Description: Permissions boundary for deployment roles in this account
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowServiceActions
+            Effect: Allow
+            Action: "*"
+            Resource: "*"
+          - Sid: DenyBoundaryEscape
+            Effect: Deny
+            Action:
+              - iam:DeleteRolePermissionsBoundary
+              - iam:DeleteUserPermissionsBoundary
+              - iam:CreateUser
+              - iam:CreateAccessKey
+              - iam:CreateLoginProfile
+            Resource: "*"
+          - Sid: DenyRoleCreationWithoutBoundary
+            Effect: Deny
+            Action:
+              - iam:CreateRole
+              - iam:PutRolePolicy
+              - iam:AttachRolePolicy
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                iam:PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/${ApplicationId}-${Environment}-${BoundaryPolicyName}"
+          - Sid: DenyAuditAndBackupMutation
+            Effect: Deny
+            Action:
+              - backup:DeleteRecoveryPoint
+              - backup:DeleteBackupVault
+              - backup:PutBackupVaultLockConfiguration
+              - cloudtrail:StopLogging
+              - cloudtrail:DeleteTrail
+              - s3:PutBucketObjectLockConfiguration
+            Resource: "*"
+          - Sid: DenyKeyDestruction
+            Effect: Deny
+            Action:
+              - kms:ScheduleKeyDeletion
+              - kms:DisableKey
+              - kms:PutKeyPolicy
+            Resource: "*"
+          - Sid: DenyGuardrailDeletion
+            Effect: Deny
+            Action: bedrock:DeleteGuardrail
+            Resource: "*"
+          - Sid: DenyDetectiveControlTampering
+            Effect: Deny
+            Action:
+              - organizations:*
+              - guardduty:Delete*
+              - securityhub:Disable*
+              - config:Delete*
+              - config:Stop*
+            Resource: "*"
+
+  # ==========================================================================
+  # CfnServiceRole - holds the permissions, exercised only by CloudFormation
+  # ==========================================================================
+  CfnServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-CfnServiceRole"
+      Description: CloudFormation service role - the actual mutation identity
+      PermissionsBoundary: !Ref DeploymentBoundary
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # CloudFormation only. No human and no pipeline role can assume this
+          # directly - it is reachable solely by being passed to a stack operation.
+          - Effect: Allow
+            Principal: { Service: cloudformation.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      # Broad by necessity - it creates every resource type in the stack set -
+      # and bounded by the permissions boundary above rather than by enumeration.
+      # Enumerating every action across nineteen stacks produces a policy that is
+      # long, incomplete, and revised on every deployment failure.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      Policies:
+        - PolicyName: iam-management
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # PowerUserAccess excludes IAM. The stacks create roles, so this
+              # adds back exactly the IAM actions needed - still bounded.
+              - Sid: ManageRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PutRolePermissionsBoundary
+                  - iam:CreatePolicy
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:CreateOpenIDConnectProvider
+                  - iam:TagOpenIDConnectProvider
+                Resource: "*"
+              - Sid: PassRoleToServices
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - lambda.amazonaws.com
+                      - bedrock.amazonaws.com
+                      - rds.amazonaws.com
+                      - events.amazonaws.com
+                      - firehose.amazonaws.com
+                      - vpc-flow-logs.amazonaws.com
+                      - backup.amazonaws.com
+                      - logs.amazonaws.com
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: internal }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # CfnDeploymentRole - starts stack operations, holds no service permissions
+  # ==========================================================================
+  CfnDeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-CfnDeploymentRole"
+      Description: Starts CloudFormation operations on behalf of the pipeline
+      PermissionsBoundary: !Ref DeploymentBoundary
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${SharedServicesAccountId}:role/${ApplicationId}-${Environment}-PipelineExecRole"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref DeploymentExternalId
+      Policies:
+        - PolicyName: stack-operations
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: StackOperations
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DetectStackDrift
+                  - cloudformation:DescribeStackDriftDetectionStatus
+                  - cloudformation:ListExports
+                Resource: "*"
+              # The whole design in one statement: this role can pass exactly one
+              # role, only to CloudFormation. It cannot pass CfnServiceRole to
+              # anything else, and it cannot pass anything else to CloudFormation.
+              - Sid: PassServiceRoleToCloudFormationOnly
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CfnServiceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: ReadArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "arn:aws:s3:::${ApplicationId}-${Environment}-artifacts-${SharedServicesAccountId}/*"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: internal }
+        - { Key: owner, Value: !Ref Owner }
+
+Outputs:
+  CfnDeploymentRoleArn:
+    Value: !GetAtt CfnDeploymentRole.Arn
+    Description: Assumed by PipelineExecRole from Shared Services
+  CfnServiceRoleArn:
+    Value: !GetAtt CfnServiceRole.Arn
+    Description: Pass as --role-arn on every deploy in this account
+  DeploymentBoundaryArn:
+    Value: !Ref DeploymentBoundary

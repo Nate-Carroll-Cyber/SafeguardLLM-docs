@@ -1,0 +1,711 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Layer 03 - Runtime IAM roles (spec section 7.1).
+
+  Role names are fixed by RoleName because layer 02 endpoint policies construct
+  these ARNs from a naming convention rather than importing them. Renaming a role
+  here silently breaks the corresponding endpoint policy - the call fails at the
+  network boundary with an opaque denial rather than an IAM error.
+
+  Resource ARNs for tables, secrets, and buckets are also constructed by name.
+  Layer 04 creates them; this stack must not depend on it, or the cycle returns.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  ApplicationId:
+    Type: String
+    Default: genai-workload
+  CostCenter:
+    Type: String
+  Owner:
+    Type: String
+  DataClassification:
+    Type: String
+    Default: confidential
+  KmsStackName:
+    Type: String
+  EndpointStackName:
+    Type: String
+  ApprovedInferenceProfileArns:
+    Type: CommaDelimitedList
+  GuardrailArn:
+    Type: String
+    Description: >
+      MUST include the numeric version, e.g. arn:...:guardrail/abc123:3
+      A bare identifier lets the guardrail be weakened in place with no
+      deployment and no review - the permissions boundary denies deletion only.
+    AllowedPattern: "^arn:aws:bedrock:[a-z0-9-]+:[0-9]{12}:guardrail/[a-z0-9]+:[0-9]+$"
+  EmbeddingModelArn:
+    Type: String
+    Description: Foundation model ARN used by the knowledge base for embeddings
+  KnowledgeBaseArn:
+    Type: String
+  VectorBucketArn:
+    Type: String
+    Description: S3 bucket holding the knowledge base data source
+  KbRetrieveExternalId:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: sts:ExternalId for the SafeguardExecRole -> KBRetrieveRole hop
+
+Resources:
+
+  # ==========================================================================
+  # SafeguardExecRole - the Express adapter
+  # ==========================================================================
+  SafeguardExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-SafeguardExecRole"
+      Description: Express adapter execution role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+
+        # --- ENI management for VPC attachment.
+        #     Cannot carry aws:SourceVpce: these are EC2 control-plane calls made
+        #     by the Lambda service on the role's behalf, before any endpoint
+        #     exists in the request path. Documented carve-out, not an oversight.
+        - PolicyName: vpc-eni-management
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EniLifecycle
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:AssignPrivateIpAddresses
+                  - ec2:UnassignPrivateIpAddresses
+                Resource: "*"
+
+        - PolicyName: telemetry
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: OwnLogGroupOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationId}-${Environment}-adapter:*"
+              - Sid: Tracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
+
+        # --- Inference. Two conditions, both required:
+        #     GuardrailIdentifier pins the guardrail AND its version.
+        #     The explicit Deny under StringNotEquals means no other attached
+        #     policy can widen this - an Allow elsewhere cannot override a Deny.
+        - PolicyName: bedrock-inference
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: GuardedInvokeOnly
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: !Ref ApprovedInferenceProfileArns
+                Condition:
+                  StringEquals:
+                    bedrock:GuardrailIdentifier: !Ref GuardrailArn
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-BedrockRuntimeEndpointId" }
+              - Sid: DenyUnguardedInvoke
+                Effect: Deny
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+                Condition:
+                  StringNotEquals:
+                    bedrock:GuardrailIdentifier: !Ref GuardrailArn
+              - Sid: AllowApplyGuardrail
+                Effect: Allow
+                Action: bedrock:ApplyGuardrail
+                Resource: !Ref GuardrailArn
+              # bedrock:Converse is NOT an IAM action. The Converse API authorizes
+              # on InvokeModel, which is granted above.
+
+        - PolicyName: assume-kb-retrieve
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AssumeRetrieveBoundary
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-KBRetrieveRole"
+                Condition:
+                  StringEquals:
+                    sts:ExternalId: !Ref KbRetrieveExternalId
+
+        # --- Ledger and budget. LeadingKeys binds the partition key to the tenant
+        #     in the request context, which is why the ledger pk is TENANT#<id>.
+        #     Changing that key shape disables this condition silently.
+        - PolicyName: dynamodb-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # dynamodb:TransactWriteItems is NOT an IAM action. The
+              # TransactWriteItems API authorizes on the item-level action for
+              # each operation in the transaction, plus ConditionCheckItem for
+              # any condition check. Granting the non-existent action produces a
+              # policy that saves cleanly and denies every transaction at runtime.
+              - Sid: TenantScopedLedger
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-ledger"
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys: "TENANT#*"
+                  StringEquals:
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-DynamoDbGatewayEndpointId" }
+              - Sid: BudgetCounters
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-budget"
+                Condition:
+                  StringEquals:
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-DynamoDbGatewayEndpointId" }
+
+        - PolicyName: secrets-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: NamedSecretsOnly
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationId}/${Environment}/db-*"
+                Condition:
+                  StringEquals:
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-SecretsManagerEndpointId" }
+
+        # --- IAM database authentication. The resource ARN names the database
+        #     user, not the cluster - rds-db:connect authorizes a specific user.
+        - PolicyName: rds-iam-auth
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: IamDbConnect
+                Effect: Allow
+                Action: rds-db:connect
+                Resource: !Sub "arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:*/${ApplicationId}_app"
+
+        # --- S3 writes. Both encryption conditions are required: the first forces
+        #     SSE-KMS, the second pins which key. Without the second, a caller can
+        #     satisfy the first with any key in the account.
+        - PolicyName: s3-write
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EncryptedWritesOnly
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${ApplicationId}-${Environment}-app-${AWS::AccountId}/*"
+                Condition:
+                  StringEquals:
+                    s3:x-amz-server-side-encryption: aws:kms
+                    s3:x-amz-server-side-encryption-aws-kms-key-id:
+                      { "Fn::ImportValue": !Sub "${KmsStackName}-AppDataKeyArn" }
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-S3GatewayEndpointId" }
+
+        - PolicyName: kms-use
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AppDataKeyOnly
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource:
+                  - { "Fn::ImportValue": !Sub "${KmsStackName}-AppDataKeyArn" }
+                  - { "Fn::ImportValue": !Sub "${KmsStackName}-SecretsKeyArn" }
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # KBRetrieveRole - retrieval privilege boundary
+  #
+  # The point is not the permission set, which is one action. It is that reaching
+  # the corpus requires a distinct AssumeRole event, which is separately auditable
+  # in CloudTrail and can be alarmed on. A compromised adapter cannot query the
+  # vector store as a side effect of already running.
+  # ==========================================================================
+  KBRetrieveRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-KBRetrieveRole"
+      Description: Retrieval boundary, assumed by the adapter
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              # Named role ARN, never the account root. Root here would let any
+              # principal in the account with sts:AssumeRole take this role.
+              AWS: !GetAtt SafeguardExecRole.Arn
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref KbRetrieveExternalId
+      Policies:
+        - PolicyName: kb-retrieve
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: RetrieveOnly
+                Effect: Allow
+                Action: bedrock:Retrieve
+                Resource: !Ref KnowledgeBaseArn
+                Condition:
+                  StringEquals:
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-BedrockAgentRuntimeEndpointId" }
+              # RetrieveAndGenerate is deliberately absent. It issues an implicit
+              # model invocation carrying no guardrail identifier, so a role bound
+              # by the enforcement condition would be denied on it regardless -
+              # and granting it here would create a path around that condition.
+              - Sid: DenyGenerativeRetrieval
+                Effect: Deny
+                Action:
+                  - bedrock:RetrieveAndGenerate
+                  - bedrock:InvokeAgent
+                Resource: "*"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # KnowledgeBaseServiceRole - assumed by Bedrock, not by the application
+  #
+  # Distinct from KBRetrieveRole. The caller-side action is bedrock:Retrieve;
+  # this role holds the service-side permissions the knowledge base needs to read
+  # the data source, query the index, and call the embedding model. Conflating
+  # the two produces a knowledge base that cannot sync.
+  # ==========================================================================
+  KnowledgeBaseServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-KnowledgeBaseServiceRole"
+      Description: Bedrock knowledge base service role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: bedrock.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                # Both required against confused-deputy: SourceAccount alone lets
+                # any knowledge base in the account use this role.
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*"
+      Policies:
+        - PolicyName: kb-service
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadDataSource
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Ref VectorBucketArn
+                  - !Sub "${VectorBucketArn}/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Ref AWS::AccountId
+              - Sid: EmbeddingModel
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Ref EmbeddingModelArn
+              - Sid: VectorIndex
+                Effect: Allow
+                Action:
+                  - s3vectors:GetVectors
+                  - s3vectors:PutVectors
+                  - s3vectors:QueryVectors
+                  - s3vectors:DeleteVectors
+                  - s3vectors:GetIndex
+                Resource: !Sub "arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ApplicationId}-${Environment}-vectors/index/*"
+              - Sid: VectorKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: { "Fn::ImportValue": !Sub "${KmsStackName}-VectorKeyArn" }
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # EgressProxyRole - the only function permitted outbound
+  #
+  # Holds ApplyGuardrail and no inference permission. It can guard a model call,
+  # not make one. That asymmetry is the containment: a compromised egress proxy
+  # cannot invoke a model, and a compromised adapter cannot reach the internet.
+  # ==========================================================================
+  EgressProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-EgressProxyRole"
+      Description: Third-party inference egress proxy
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: vpc-eni-management
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EniLifecycle
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+        - PolicyName: guard-and-egress
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: GuardOnly
+                Effect: Allow
+                Action: bedrock:ApplyGuardrail
+                Resource: !Ref GuardrailArn
+              - Sid: DenyAllInference
+                Effect: Deny
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:Retrieve
+                  - bedrock:RetrieveAndGenerate
+                Resource: "*"
+              - Sid: ThirdPartyApiKey
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationId}/${Environment}/judge-api-*"
+              - Sid: LedgerEgressRecord
+                Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-ledger"
+              - Sid: OwnLogGroupOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationId}-${Environment}-egress-proxy:*"
+              - Sid: SecretsKeyUse
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: { "Fn::ImportValue": !Sub "${KmsStackName}-SecretsKeyArn" }
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # AuthorizerRole
+  #
+  # Reads the entitlement table and nothing else. It holds no Bedrock permission,
+  # no ledger write, and no secret - a compromised authorizer can make wrong
+  # authorization decisions but cannot act on them.
+  # ==========================================================================
+  AuthorizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-AuthorizerRole"
+      Description: API Gateway REQUEST authorizer
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: vpc-eni-management
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EniLifecycle
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+        - PolicyName: entitlement-lookup
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Read-only. The authorizer resolves entitlement; it never grants it.
+              - Sid: ReadEntitlementOnly
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-entitlement"
+                Condition:
+                  StringEquals:
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-DynamoDbGatewayEndpointId" }
+              # Revocation denylist. Read-only for the same reason: the
+              # authorizer decides whether a token is revoked, it never decides
+              # that one is not.
+              - Sid: ReadRevocationOnly
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-revocation"
+                Condition:
+                  StringEquals:
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-DynamoDbGatewayEndpointId" }
+              - Sid: DenyEntitlementAndRevocationWrite
+                Effect: Deny
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-entitlement"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-revocation"
+              - Sid: OwnLogGroupOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationId}-${Environment}-authorizer:*"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # SecretsRotationRole
+  #
+  # Rotates two unrelated things: database credentials, and the x-origin-verify
+  # header. The second needs CloudFront and WAF write permission, which is why
+  # this role is broader than it first appears.
+  # ==========================================================================
+  SecretsRotationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-SecretsRotationRole"
+      Description: Secrets Manager rotation function
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: vpc-eni-management
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EniLifecycle
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+        - PolicyName: rotation
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: RotateNamedSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:UpdateSecretVersionStage
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationId}/${Environment}/db-*"
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationId}/${Environment}/origin-verify-*"
+                Condition:
+                  StringEquals:
+                    secretsmanager:resource/AllowRotationLambdaArn:
+                      !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ApplicationId}-${Environment}-secrets-rotation"
+              - Sid: GetRandomPassword
+                Effect: Allow
+                Action: secretsmanager:GetRandomPassword
+                Resource: "*"
+              - Sid: SecretsKeyUse
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: { "Fn::ImportValue": !Sub "${KmsStackName}-SecretsKeyArn" }
+              # Origin-verify rotation must update the CloudFront origin custom
+              # header and the WAF rule together. Splitting them across two
+              # rotations opens a window where the header does not match the rule.
+              - Sid: OriginVerifyRotation
+                Effect: Allow
+                Action:
+                  - cloudfront:GetDistributionConfig
+                  - cloudfront:UpdateDistribution
+                Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/*"
+              - Sid: WafRuleUpdate
+                Effect: Allow
+                Action:
+                  - wafv2:GetWebACL
+                  - wafv2:UpdateWebACL
+                Resource: !Sub "arn:aws:wafv2:${AWS::Region}:${AWS::AccountId}:regional/webacl/${ApplicationId}-${Environment}-*/*"
+              - Sid: OwnLogGroupOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationId}-${Environment}-secrets-rotation:*"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # LifecycleRole - scheduled data lifecycle (spec section 12)
+  #
+  # Drops Aurora partitions and consumes DynamoDB Streams to write erasure
+  # receipts. Deliberately cannot read item content: it operates on keys and
+  # partition names, so a compromise yields deletion capability but not disclosure.
+  # ==========================================================================
+  LifecycleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-LifecycleRole"
+      Description: Scheduled data lifecycle and erasure receipts
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: vpc-eni-management
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EniLifecycle
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+        - PolicyName: lifecycle
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: IamDbConnect
+                Effect: Allow
+                Action: rds-db:connect
+                Resource: !Sub "arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:*/${ApplicationId}_lifecycle"
+              - Sid: StreamConsumption
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-ledger/stream/*"
+              - Sid: OwnLogGroupOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationId}-${Environment}-lifecycle:*"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+Outputs:
+  SafeguardExecRoleArn:
+    Value: !GetAtt SafeguardExecRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-SafeguardExecRoleArn" }
+  KBRetrieveRoleArn:
+    Value: !GetAtt KBRetrieveRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-KBRetrieveRoleArn" }
+  KnowledgeBaseServiceRoleArn:
+    Value: !GetAtt KnowledgeBaseServiceRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-KnowledgeBaseServiceRoleArn" }
+  EgressProxyRoleArn:
+    Value: !GetAtt EgressProxyRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-EgressProxyRoleArn" }
+  AuthorizerRoleArn:
+    Value: !GetAtt AuthorizerRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-AuthorizerRoleArn" }
+  SecretsRotationRoleArn:
+    Value: !GetAtt SecretsRotationRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-SecretsRotationRoleArn" }
+  LifecycleRoleArn:
+    Value: !GetAtt LifecycleRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-LifecycleRoleArn" }

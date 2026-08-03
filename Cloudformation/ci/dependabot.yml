@@ -1,0 +1,54 @@
+# .github/dependabot.yml
+#
+# Three ecosystems, because a supply-chain compromise reaches the adapter through
+# any of them. The github-actions ecosystem matters most and is the one usually
+# omitted: a compromised action runs with whatever permissions the workflow grants,
+# including id-token: write, which is the ability to assume a deployment role.
+
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 10
+    labels: [dependencies, security]
+    # Group routine updates so security advisories stand out. Security updates
+    # bypass grouping and open individually.
+    groups:
+      aws-sdk:
+        patterns: ["@aws-sdk/*"]
+        update-types: [minor, patch]
+      dev:
+        dependency-type: development
+        update-types: [minor, patch]
+    ignore:
+      # Majors need a human decision, not an automated PR.
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: npm
+    directory: /src/authorizer
+    schedule:
+      interval: daily
+    labels: [dependencies, security, authorizer]
+    # No grouping here. The authorizer is the authorization boundary; every
+    # dependency change to it gets reviewed on its own.
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [ci, security]
+    # Actions are pinned to commit SHAs in the workflows. Dependabot understands
+    # SHA pins and will propose the next SHA with the version in the comment,
+    # which keeps the pin current without reverting to mutable tags.
+
+  - package-ecosystem: terraform
+    directory: /infrastructure
+    schedule:
+      interval: weekly
+    labels: [infrastructure, security]
+    # Remove this block if the stack is CloudFormation-only. Retained here because
+    # module version drift is the equivalent supply-chain surface for IaC.
