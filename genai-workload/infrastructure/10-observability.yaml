@@ -1,0 +1,439 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Layer 10 - Model invocation logging, alarms, cost circuit breakers, and the
+  EventBridge response runbooks.
+
+  Where this deviates from spec section 10: WAF, Network Firewall, and VPC Flow
+  Logs land in workload-account CloudWatch groups rather than Firehose to the Log
+  Archive account. Closing that requires the Log Archive bucket, its policy, and
+  cmk/audit, none of which exist in the 00-10 workload sequence. Subscription
+  filters are stubbed below for when they do.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  ApplicationId:
+    Type: String
+    Default: genai-workload
+  CostCenter:
+    Type: String
+  Owner:
+    Type: String
+  DataClassification:
+    Type: String
+    Default: confidential
+  KmsStackName:
+    Type: String
+  SecurityAlertTopicArn:
+    Type: String
+    Description: SNS topic in the Security account for paging
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 5000
+  JudgeLatencyThresholdMs:
+    Type: Number
+    Default: 20000
+    Description: >
+      Below the 25 s judge cap. An attacker who slows the judge toward the cap
+      forces 504s across the board without ever tripping an error-rate alarm.
+  InvocationLogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [7, 14, 30, 60, 90]
+    Description: >
+      Prompt and completion bodies. Shortest defensible period - this store holds
+      user content by definition, unlike every other log in this stack.
+
+Resources:
+
+  # ==========================================================================
+  # Bedrock model invocation logging
+  #
+  # CloudTrail records that a call occurred, never its content. This records the
+  # content. They are different systems recording different things and both are
+  # required - but only this one is a user-content store, which is why it gets
+  # its own key, its own retention, and a restricted read path.
+  # ==========================================================================
+  InvocationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/bedrock/${ApplicationId}-${Environment}/invocations"
+      RetentionInDays: !Ref InvocationLogRetentionDays
+      KmsKeyId: { "Fn::ImportValue": !Sub "${KmsStackName}-LogsKeyArn" }
+
+  InvocationLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-BedrockInvocationLogRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: bedrock.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:*"
+      Policies:
+        - PolicyName: write-invocation-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt InvocationLogGroup.Arn
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: restricted }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # Alarms
+  # ==========================================================================
+
+  # Tier 2 of the three-tier circuit breaker. Minutes, versus hours-to-a-day for
+  # Budgets. Cost Explorer updates daily, so a runaway loop consumes a month of
+  # budget before tier 3 reacts - this is the operational control, tier 3 is the
+  # backstop for when this alarm was misconfigured.
+  InputTokenAnomalyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationId}-${Environment}-input-token-anomaly"
+      AlarmDescription: Bedrock input token consumption outside the expected band
+      ComparisonOperator: GreaterThanUpperThreshold
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      ThresholdMetricId: band
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: tokens
+          MetricStat:
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: InputTokenCount
+            Period: 300
+            Stat: Sum
+          ReturnData: true
+        - Id: band
+          Expression: ANOMALY_DETECTION_BAND(tokens, 3)
+          ReturnData: true
+      AlarmActions: [!Ref SecurityAlertTopicArn]
+
+  OutputTokenAnomalyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationId}-${Environment}-output-token-anomaly"
+      ComparisonOperator: GreaterThanUpperThreshold
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      ThresholdMetricId: band
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: tokens
+          MetricStat:
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: OutputTokenCount
+            Period: 300
+            Stat: Sum
+          ReturnData: true
+        - Id: band
+          Expression: ANOMALY_DETECTION_BAND(tokens, 3)
+          ReturnData: true
+      AlarmActions: [!Ref SecurityAlertTopicArn]
+
+  # Guardrail throttling is the fail-open pressure point in the egress path
+  # (MAESTRO L8-T03). The code fails closed, so this is an availability signal -
+  # but it is also the signature of someone probing for that failure mode.
+  GuardrailThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationId}-${Environment}-guardrail-throttle"
+      AlarmDescription: ApplyGuardrail throttling - egress fails closed while this fires
+      Namespace: AWS/Bedrock
+      MetricName: InvocationThrottles
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SecurityAlertTopicArn]
+
+  # Latency, not error rate. A judge slowed toward the 25 s cap forces 504s
+  # across the board without producing a single judge error.
+  JudgeLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationId}-${Environment}-judge-latency"
+      AlarmDescription: Egress proxy duration approaching the API Gateway ceiling
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "${ApplicationId}-${Environment}-egress-proxy"
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref JudgeLatencyThresholdMs
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SecurityAlertTopicArn]
+
+  # Reserved concurrency on the adapter is a consumption control. Throttling
+  # means it is working - and that legitimate traffic is being shed.
+  AdapterThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationId}-${Environment}-adapter-throttle"
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "${ApplicationId}-${Environment}-adapter"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SecurityAlertTopicArn]
+
+  # An authorizer that starts failing is an outage. One that starts succeeding
+  # unusually often after a config change is something else.
+  AuthorizerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationId}-${Environment}-authorizer-errors"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub "${ApplicationId}-${Environment}-authorizer"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SecurityAlertTopicArn]
+
+  # ==========================================================================
+  # Guardrail intervention tracking
+  #
+  # Rate is monitored as a trend, not checked as a configuration. A step change
+  # coinciding with a deployment is the signature of a weakened guardrail - which
+  # the permissions boundary does not catch, because weakening is not deleting.
+  # ==========================================================================
+  GuardrailInterventionMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref InvocationLogGroup
+      FilterPattern: '{ $.output.outputBodyJson.amazon-bedrock-guardrailAction = "INTERVENED" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub "${ApplicationId}/${Environment}"
+          MetricName: GuardrailInterventions
+          MetricValue: "1"
+          DefaultValue: 0
+
+  # Fires on an unexplained DROP. A quieter attack environment and a degraded
+  # guardrail look identical in aggregate - which is why per-attack-class rates
+  # belong in the adversarial regression suite rather than here.
+  GuardrailInterventionDropAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ApplicationId}-${Environment}-guardrail-intervention-drop"
+      AlarmDescription: Intervention rate fell below the expected band - possible guardrail regression
+      ComparisonOperator: LessThanLowerThreshold
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      ThresholdMetricId: band
+      TreatMissingData: breaching
+      Metrics:
+        - Id: interventions
+          MetricStat:
+            Metric:
+              Namespace: !Sub "${ApplicationId}/${Environment}"
+              MetricName: GuardrailInterventions
+            Period: 3600
+            Stat: Sum
+          ReturnData: true
+        - Id: band
+          Expression: ANOMALY_DETECTION_BAND(interventions, 2)
+          ReturnData: true
+      AlarmActions: [!Ref SecurityAlertTopicArn]
+
+  # ==========================================================================
+  # Cost controls
+  # ==========================================================================
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "${ApplicationId}-${Environment}"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+        CostFilters:
+          TagKeyValue:
+            - !Sub "user:applicationId$${ApplicationId}"
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: SNS, Address: !Ref SecurityAlertTopicArn }
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: SNS, Address: !Ref SecurityAlertTopicArn }
+        - Notification:
+            # Forecast, not actual. At 100% actual the money is already spent.
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: SNS, Address: !Ref SecurityAlertTopicArn }
+
+  # Routed to the security alert topic, not to finance. An unexplained inference
+  # cost spike is often the fastest available indicator of credential abuse, an
+  # authorization bypass, or a retrieval loop.
+  BedrockCostAnomalyMonitor:
+    Type: AWS::CE::AnomalyMonitor
+    Properties:
+      MonitorName: !Sub "${ApplicationId}-${Environment}-bedrock"
+      MonitorType: DIMENSIONAL
+      MonitorDimension: SERVICE
+
+  BedrockCostAnomalySubscription:
+    Type: AWS::CE::AnomalySubscription
+    Properties:
+      SubscriptionName: !Sub "${ApplicationId}-${Environment}-cost-anomaly"
+      Frequency: IMMEDIATE
+      MonitorArnList: [!Ref BedrockCostAnomalyMonitor]
+      Subscribers:
+        - Type: SNS
+          Address: !Ref SecurityAlertTopicArn
+      # ThresholdExpression is a JSON-encoded string, not a structure.
+      ThresholdExpression: >-
+        {"Dimensions":{"Key":"ANOMALY_TOTAL_IMPACT_ABSOLUTE",
+        "MatchOptions":["GREATER_THAN_OR_EQUAL"],"Values":["100"]}}
+
+  # ==========================================================================
+  # Response runbooks
+  # ==========================================================================
+  ResponseRunbookRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-ResponseRunbookRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: containment
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Containment lands at the WAF layer rather than on token
+              # revocation: a revoked token stays accepted until the authorizer
+              # cache lapses, and the WAF is not cached.
+              - Sid: BlockedIdentitySet
+                Effect: Allow
+                Action:
+                  - wafv2:GetIPSet
+                  - wafv2:UpdateIPSet
+                Resource: !Sub "arn:aws:wafv2:${AWS::Region}:${AWS::AccountId}:regional/ipset/${ApplicationId}-${Environment}-blocked/*"
+              - Sid: ConcurrencyContainment
+                Effect: Allow
+                Action: lambda:PutFunctionConcurrency
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ApplicationId}-${Environment}-*"
+              # Token revocation. Faster than the WAF path for a specific
+              # credential: the authorizer reads this with ConsistentRead on
+              # every uncached request, so a write here takes effect within one
+              # cache TTL rather than needing an IP-set update.
+              - Sid: RevokeTokens
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-revocation"
+              - Sid: Notify
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SecurityAlertTopicArn
+              # The runbook cannot modify audit, backup, or KMS resources. A
+              # containment action must never be able to erase its own trace.
+              - Sid: DenyAuditMutation
+                Effect: Deny
+                Action:
+                  - kms:*
+                  - backup:*
+                  - cloudtrail:*
+                  - logs:DeleteLogGroup
+                  - logs:DeleteRetentionPolicy
+                Resource: "*"
+              - Sid: OwnLogGroupOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationId}-${Environment}-response-runbook:*"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  SecurityFindingRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ApplicationId}-${Environment}-security-findings"
+      Description: High-severity findings and cost anomalies to containment
+      EventPattern:
+        source:
+          - aws.securityhub
+          - aws.guardduty
+          - aws.ce
+        detail-type:
+          - Security Hub Findings - Imported
+          - GuardDuty Finding
+          - Cost Anomaly Detection
+      State: ENABLED
+      Targets:
+        - Id: notify
+          Arn: !Ref SecurityAlertTopicArn
+
+Outputs:
+  InvocationLogGroupName:
+    Value: !Ref InvocationLogGroup
+    Export: { Name: !Sub "${AWS::StackName}-InvocationLogGroupName" }
+  InvocationLogRoleArn:
+    Value: !GetAtt InvocationLogRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-InvocationLogRoleArn" }
+  ResponseRunbookRoleArn:
+    Value: !GetAtt ResponseRunbookRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-ResponseRunbookRoleArn" }

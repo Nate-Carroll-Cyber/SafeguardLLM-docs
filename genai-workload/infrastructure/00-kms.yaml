@@ -1,0 +1,381 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Layer 00 - Customer managed keys, separated by data class (spec section 9).
+  Deploy first: every later stack references these by alias.
+  Keys in the Log Archive and Backup accounts are NOT created here - they belong
+  to those accounts and exclude workload principals from their key policies.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  ApplicationId:
+    Type: String
+    Default: genai-workload
+  CostCenter:
+    Type: String
+  Owner:
+    Type: String
+  DataClassification:
+    Type: String
+    Default: confidential
+    AllowedValues: [public, internal, confidential, restricted]
+  KeyAdminRoleArn:
+    Type: String
+    Description: Role permitted to administer (not use) these keys. Not the deployment role.
+    AllowedPattern: "^arn:aws:iam::[0-9]{12}:role/.+$"
+
+Resources:
+
+  # --------------------------------------------------------------------------
+  # cmk/app-data - application S3 and DynamoDB
+  # --------------------------------------------------------------------------
+  AppDataKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "${ApplicationId} application data (S3, DynamoDB)"
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Root access is required for CloudFormation and for account recovery.
+          # Narrowing this to nothing locks the key permanently.
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: KeyAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          # Service principals get grant-based access, scoped by ViaService so a
+          # confused-deputy call from another service cannot use the key.
+          - Sid: AllowServiceUse
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService:
+                  - !Sub "s3.${AWS::Region}.amazonaws.com"
+                  - !Sub "dynamodb.${AWS::Region}.amazonaws.com"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  AppDataKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ApplicationId}/${Environment}/app-data"
+      TargetKeyId: !Ref AppDataKey
+
+  # --------------------------------------------------------------------------
+  # cmk/secrets - Secrets Manager
+  # --------------------------------------------------------------------------
+  SecretsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "${ApplicationId} Secrets Manager"
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: KeyAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Sid: AllowSecretsManagerUse
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: restricted }
+        - { Key: owner, Value: !Ref Owner }
+
+  SecretsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ApplicationId}/${Environment}/secrets"
+      TargetKeyId: !Ref SecretsKey
+
+  # --------------------------------------------------------------------------
+  # cmk/rds - Aurora storage and proxy secrets
+  # --------------------------------------------------------------------------
+  RdsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "${ApplicationId} Aurora storage and snapshots"
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: KeyAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Sid: AllowRdsUse
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+              - kms:CreateGrant
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "rds.${AWS::Region}.amazonaws.com"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  RdsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ApplicationId}/${Environment}/rds"
+      TargetKeyId: !Ref RdsKey
+
+  # --------------------------------------------------------------------------
+  # cmk/vector - S3 Vectors index and knowledge base data source
+  # --------------------------------------------------------------------------
+  VectorKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "${ApplicationId} vector index and knowledge base source"
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: KeyAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Sid: AllowBedrockAndS3Use
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService:
+                  - !Sub "s3.${AWS::Region}.amazonaws.com"
+                  - !Sub "bedrock.${AWS::Region}.amazonaws.com"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  VectorKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ApplicationId}/${Environment}/vector"
+      TargetKeyId: !Ref VectorKey
+
+  # --------------------------------------------------------------------------
+  # cmk/logs - CloudWatch log groups and Firehose
+  #
+  # CloudWatch Logs needs an explicit service-principal grant with an
+  # EncryptionContext condition. Without the condition, any log group in the
+  # account can use this key. With ViaService alone it does not work at all -
+  # Logs calls KMS directly, not via another service.
+  # --------------------------------------------------------------------------
+  LogsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "${ApplicationId} CloudWatch log groups"
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: KeyAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: "*"
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn:
+                  !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: internal }
+        - { Key: owner, Value: !Ref Owner }
+
+  LogsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ApplicationId}/${Environment}/logs"
+      TargetKeyId: !Ref LogsKey
+
+Outputs:
+  AppDataKeyArn:
+    Value: !GetAtt AppDataKey.Arn
+    Export: { Name: !Sub "${AWS::StackName}-AppDataKeyArn" }
+  AppDataKeyId:
+    Value: !Ref AppDataKey
+    Export: { Name: !Sub "${AWS::StackName}-AppDataKeyId" }
+  SecretsKeyArn:
+    Value: !GetAtt SecretsKey.Arn
+    Export: { Name: !Sub "${AWS::StackName}-SecretsKeyArn" }
+  RdsKeyArn:
+    Value: !GetAtt RdsKey.Arn
+    Export: { Name: !Sub "${AWS::StackName}-RdsKeyArn" }
+  VectorKeyArn:
+    Value: !GetAtt VectorKey.Arn
+    Export: { Name: !Sub "${AWS::StackName}-VectorKeyArn" }
+  LogsKeyArn:
+    Value: !GetAtt LogsKey.Arn
+    Export: { Name: !Sub "${AWS::StackName}-LogsKeyArn" }

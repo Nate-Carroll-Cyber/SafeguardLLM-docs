@@ -1,0 +1,228 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Layer 12 - AWS Backup plan. DEPLOY TO THE WORKLOAD ACCOUNT, after layer 21.
+
+  Without this the central vault in the Backup account is empty and the
+  cross-account custody claim in spec section 13.2 is not true. Aurora automated
+  backups and DynamoDB PITR are cluster-local and account-local: they survive an
+  operator mistake, not a compromise of this account.
+
+  Every rule copies to the Backup account. The local vault is a staging point;
+  the copy is the control, because a full compromise here can reach the local
+  vault and cannot reach the destination.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  ApplicationId:
+    Type: String
+    Default: genai-workload
+  CostCenter:
+    Type: String
+  Owner:
+    Type: String
+  DataClassification:
+    Type: String
+    Default: confidential
+  KmsStackName:
+    Type: String
+  DataStackName:
+    Type: String
+  CentralVaultArn:
+    Type: String
+    Description: From layer 21 output CentralVaultArn, in the Backup account
+    AllowedPattern: "^arn:aws:backup:[a-z0-9-]+:[0-9]{12}:backup-vault:.+$"
+  DailyRetentionDays:
+    Type: Number
+    Default: 35
+    MinValue: 1
+    Description: >
+      Matches the Aurora PITR window. Shorter than this leaves a gap where PITR
+      has expired and no snapshot exists.
+  MonthlyRetentionDays:
+    Type: Number
+    Default: 365
+  ColdStorageAfterDays:
+    Type: Number
+    Default: 30
+    Description: >
+      Cold storage has a 90-day minimum billing period. A monthly point moved to
+      cold at 30 days and deleted at 365 is fine; anything with retention under
+      120 days should stay warm or it bills for storage it does not use.
+
+Resources:
+
+  # ==========================================================================
+  # Local staging vault
+  #
+  # Not the control. AWS Backup copies from a local vault to a destination, so
+  # this exists to be copied from. Its access policy denies deletion anyway - a
+  # compromise here should not be able to erase the staging copy before the copy
+  # job runs.
+  # ==========================================================================
+  LocalVault:
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Sub "${ApplicationId}-${Environment}-local"
+      EncryptionKeyArn: { "Fn::ImportValue": !Sub "${KmsStackName}-RdsKeyArn" }
+      AccessPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyDeletionExceptDeployment
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - backup:DeleteRecoveryPoint
+              - backup:UpdateRecoveryPointLifecycle
+              - backup:DeleteBackupVault
+            Resource: "*"
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-CfnServiceRole"
+      BackupVaultTags:
+        costCenter: !Ref CostCenter
+        environment: !Ref Environment
+        applicationId: !Ref ApplicationId
+        dataClassification: !Ref DataClassification
+        owner: !Ref Owner
+
+  # ==========================================================================
+  # Backup service role
+  # ==========================================================================
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-BackupRole"
+      Description: AWS Backup service role for plan execution
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: backup.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+      Policies:
+        - PolicyName: key-use
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Source keys, to read what is being backed up.
+              - Sid: SourceKeys
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey
+                  - kms:CreateGrant
+                Resource:
+                  - { "Fn::ImportValue": !Sub "${KmsStackName}-RdsKeyArn" }
+                  - { "Fn::ImportValue": !Sub "${KmsStackName}-AppDataKeyArn" }
+              # Destination key lives in the Backup account and is reached
+              # through that account's key policy, which grants the org under a
+              # backup.amazonaws.com ViaService condition. Nothing is enumerated
+              # here because the ARN is not known to this stack.
+              - Sid: CopyToDestination
+                Effect: Allow
+                Action:
+                  - backup:CopyIntoBackupVault
+                Resource: !Ref CentralVaultArn
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # Plan
+  # ==========================================================================
+  BackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub "${ApplicationId}-${Environment}"
+        BackupPlanRule:
+          - RuleName: daily
+            TargetBackupVault: !Ref LocalVault
+            # 05:00 UTC, ahead of the 07:00 Aurora automated backup window in
+            # layer 04 so the two do not contend.
+            ScheduleExpression: "cron(0 5 ? * * *)"
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 180
+            EnableContinuousBackup: false
+            Lifecycle:
+              DeleteAfterDays: !Ref DailyRetentionDays
+            CopyActions:
+              - DestinationBackupVaultArn: !Ref CentralVaultArn
+                Lifecycle:
+                  DeleteAfterDays: !Ref DailyRetentionDays
+            RecoveryPointTags:
+              costCenter: !Ref CostCenter
+              environment: !Ref Environment
+              applicationId: !Ref ApplicationId
+
+          - RuleName: monthly
+            TargetBackupVault: !Ref LocalVault
+            ScheduleExpression: "cron(0 5 1 * ? *)"
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 600
+            Lifecycle:
+              MoveToColdStorageAfterDays: !Ref ColdStorageAfterDays
+              DeleteAfterDays: !Ref MonthlyRetentionDays
+            CopyActions:
+              - DestinationBackupVaultArn: !Ref CentralVaultArn
+                Lifecycle:
+                  MoveToColdStorageAfterDays: !Ref ColdStorageAfterDays
+                  DeleteAfterDays: !Ref MonthlyRetentionDays
+            RecoveryPointTags:
+              costCenter: !Ref CostCenter
+              environment: !Ref Environment
+              applicationId: !Ref ApplicationId
+      BackupPlanTags:
+        costCenter: !Ref CostCenter
+        environment: !Ref Environment
+        applicationId: !Ref ApplicationId
+        dataClassification: !Ref DataClassification
+        owner: !Ref Owner
+
+  # Selection by explicit ARN rather than by tag. A tag-based selection silently
+  # stops covering a resource whose tag is removed or mistyped; an ARN list fails
+  # loudly at deploy time instead.
+  BackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      BackupSelection:
+        SelectionName: !Sub "${ApplicationId}-${Environment}-resources"
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !Sub
+            - "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${Cluster}"
+            - Cluster: !Sub "${ApplicationId}-${Environment}"
+          - !Sub
+            - "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}"
+            - Table: { "Fn::ImportValue": !Sub "${DataStackName}-LedgerTableName" }
+          # The entitlement table is small and rarely changes, and every tenant
+          # boundary in the system resolves back to a row in it. Losing it is not
+          # a data-loss incident, it is an authorization outage.
+          - !Sub
+            - "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}"
+            - Table: { "Fn::ImportValue": !Sub "${DataStackName}-EntitlementTableName" }
+
+Outputs:
+  LocalVaultName:
+    Value: !Ref LocalVault
+    Export: { Name: !Sub "${AWS::StackName}-LocalVaultName" }
+  BackupPlanId:
+    Value: !Ref BackupPlan
+    Export: { Name: !Sub "${AWS::StackName}-BackupPlanId" }
+  BackupRoleArn:
+    Value: !GetAtt BackupRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-BackupRoleArn" }
