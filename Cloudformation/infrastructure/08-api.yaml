@@ -270,6 +270,7 @@ Resources:
           "clientId":"$context.authorizer.clientId",
           "tenantId":"$context.authorizer.tenantId",
           "delegated":"$context.authorizer.delegated",
+          "audience":"$context.authorizer.audience",
           "authorizerError":"$context.authorizer.error"}
       MethodSettings:
         - ResourcePath: "/*"

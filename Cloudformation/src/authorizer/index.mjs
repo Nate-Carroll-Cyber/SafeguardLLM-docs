@@ -10,8 +10,15 @@
  *   typ     Not checked — Cognito does not emit RFC 9068 `at+jwt`. Token-type
  *           separation is enforced by tokenUse instead, which is stronger here
  *           because Cognito signs it into the payload.
- *   aud     ID tokens only. Access tokens carry client_id instead and have no
- *           aud claim at all under client_credentials.
+ *   aud     Human path: REQUIRED and must equal the API resource identifier.
+ *           Cognito sets it from the RFC 8707 `resource` parameter sent at
+ *           /oauth2/authorize, and a refresh carries it forward.
+ *           Machine path: ABSENT and cannot be requested — Cognito does not
+ *           permit a resource indicator on client_credentials. Binding is
+ *           client_id there. The two paths therefore have genuinely different
+ *           validation rules, which is the correct outcome rather than a
+ *           workaround: RFC 8725 §3.10 wants token-type validation rules to be
+ *           mutually exclusive.
  *   exp/nbf Enforced. graceSeconds bounds clock skew.
  *   scope   Required per method. Deny-by-default on unmapped routes.
  *   jti     Checked against a revocation denylist (origin_jti).
@@ -48,15 +55,25 @@ const MACHINE_CLIENT_IDS = required("COGNITO_MACHINE_CLIENT_IDS").split(",");
 const ENTITLEMENT_TABLE = required("CLIENT_TENANT_ENTITLEMENT_TABLE");
 const REVOCATION_TABLE = required("TOKEN_REVOCATION_TABLE");
 
+// RFC 8707 resource indicator. Human-path access tokens must carry this as
+// their aud claim; a token without it was issued without the `resource`
+// parameter and is not bound to this API.
+const API_RESOURCE = required("API_RESOURCE_IDENTIFIER");
+
 // RFC 8725 §3.7 — allow a small skew, not an open window. Cognito and Lambda
 // are both NTP-synced, so this is generous.
 const CLOCK_SKEW_SECONDS = Number(process.env.CLOCK_SKEW_SECONDS ?? 30);
 
 // Deny-by-default: a route absent from this map is unauthorized regardless of
 // how valid the token is.
+//
+// Two accepted forms per route. A resource-bound human token carries scopes
+// prefixed with the resource identifier; a machine token carries the bare
+// `llm/*` form. The route requires one of them, not a specific one — the
+// binding is enforced by the aud check, not by the scope string.
 const SCOPE_BY_ROUTE = Object.freeze({
-  "POST /v1/inference": "llm/invoke",
-  "POST /v1/retrieve": "llm/retrieve",
+  "POST /v1/inference": ["llm/invoke", `${API_RESOURCE}/invoke`],
+  "POST /v1/retrieve": ["llm/retrieve", `${API_RESOURCE}/retrieve`],
 });
 
 // ---------------------------------------------------------------------------
@@ -85,11 +102,20 @@ const verifierConfig = {
 const humanVerifier = CognitoJwtVerifier.create({
   ...verifierConfig,
   clientId: HUMAN_CLIENT_IDS,
+  // Human tokens are resource-bound, so aud is present and must match. A token
+  // issued without the `resource` parameter has no aud and fails here — which
+  // is the intent: an unbound token is not evidence of intent to call THIS API,
+  // and RFC 8707 exists precisely to stop a token minted for one resource
+  // working at another.
+  audience: API_RESOURCE,
 });
 
 const machineVerifier = CognitoJwtVerifier.create({
   ...verifierConfig,
   clientId: MACHINE_CLIENT_IDS,
+  // No `audience`. Setting one here would reject every machine token, because
+  // Cognito cannot issue an aud claim on a client_credentials grant. clientId
+  // is the binding on this path and it is checked above.
 });
 
 await Promise.all([humanVerifier.hydrate(), machineVerifier.hydrate()]).catch(() => {
@@ -199,9 +225,9 @@ function policy(effect, methodArn, principalId, context) {
 export const handler = async (event) => {
   const methodArn = event.methodArn;
   const route = `${event.httpMethod} ${event.resource}`;
-  const requiredScope = SCOPE_BY_ROUTE[route];
+  const acceptedScopes = SCOPE_BY_ROUTE[route];
 
-  if (!requiredScope) throw new Error("Unauthorized");
+  if (!acceptedScopes) throw new Error("Unauthorized");
 
   const header = event.headers?.authorization ?? event.headers?.Authorization;
   if (!header?.startsWith("Bearer ")) throw new Error("Unauthorized");
@@ -238,10 +264,22 @@ export const handler = async (event) => {
     return policy("Deny", methodArn, claims.sub, {});
   }
 
-  // ID tokens carry no scope and cannot reach here anyway, but the check is
-  // structural: authorization comes from scope, never from authentication.
+  // Audience, asserted per path rather than left to the verifier alone. The
+  // verifier already enforces this for the human path; repeating it here makes
+  // the asymmetry explicit and catches a future change that moves a client
+  // between paths without moving its validation rule.
+  if (callerClass === "human" && claims.aud !== API_RESOURCE) {
+    return policy("Deny", methodArn, claims.sub, {});
+  }
+  if (callerClass === "machine" && claims.aud) {
+    // A machine token should have no aud. One that does was not issued by the
+    // client_credentials grant this path expects.
+    return policy("Deny", methodArn, claims.sub, {});
+  }
+
+  // Scope. Either the resource-bound or the bare form satisfies the route.
   const granted = typeof claims.scope === "string" ? claims.scope.split(" ") : [];
-  if (!granted.includes(requiredScope)) {
+  if (!acceptedScopes.some((s) => granted.includes(s))) {
     return policy("Deny", methodArn, claims.sub, {});
   }
 
@@ -272,5 +310,8 @@ export const handler = async (event) => {
     // Carried through so a containment runbook can revoke the exact token that
     // was seen misbehaving, not just the subject.
     originJti: String(claims.origin_jti),
+    // Empty on the machine path by construction. Present in the access log so
+    // an audit can distinguish a resource-bound token from an unbound one.
+    audience: String(claims.aud ?? ""),
   });
 };

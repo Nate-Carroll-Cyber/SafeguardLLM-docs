@@ -178,10 +178,22 @@ Resources:
       Dimension: !Ref EmbeddingDimension
       DistanceMetric: cosine
       MetadataConfiguration:
-        # Filterable metadata is what makes tenant-scoped retrieval possible.
-        # NonFilterableMetadataKeys lists what CANNOT be filtered - tenantId is
-        # deliberately absent from it, so it remains filterable.
+        # NonFilterableMetadataKeys lists what CANNOT be filtered.
+        #
+        # The three AMAZON_BEDROCK_* keys are reserved: the knowledge base writes
+        # chunk text and source metadata under them on every ingestion. They must
+        # be declared non-filterable or the sync fails - and the failure is at
+        # sync time, not at deploy time, so a template that omits them looks fine
+        # until the first document lands.
+        #
+        # tenantId is deliberately absent from this list, which is what keeps it
+        # filterable and makes tenant-scoped retrieval possible. Adding it here -
+        # reasonably, to save index space - would silently break tenant isolation
+        # at retrieval with no error anywhere.
         NonFilterableMetadataKeys:
+          - AMAZON_BEDROCK_TEXT
+          - AMAZON_BEDROCK_TEXT_CHUNK
+          - AMAZON_BEDROCK_METADATA
           - sourceText
 
   # Data source bucket. Separate from the vector index: this holds the documents,
@@ -208,6 +220,14 @@ Resources:
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced
+      # EventBridge on object creation. This is the hook an ingestion-validation
+      # workflow needs: content landing here is chunked, embedded, and served as
+      # grounding context, so validation has to fire on write rather than on a
+      # schedule. The rule and its target are not built yet — enabling this now
+      # means adding them later does not require another change to the bucket.
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
       Tags:
         - { Key: costCenter, Value: !Ref CostCenter }
         - { Key: environment, Value: !Ref Environment }
@@ -231,6 +251,19 @@ Resources:
               - !Sub "${KnowledgeBaseSourceBucket.Arn}/*"
             Condition:
               Bool: { "aws:SecureTransport": "false" }
+          # Rejects pre-SigV4 signing. Cheap, and it closes a path where an old
+          # SDK or a hand-rolled client presents a weaker signature that S3 would
+          # otherwise still accept.
+          - Sid: DenyNonSigV4
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt KnowledgeBaseSourceBucket.Arn
+              - !Sub "${KnowledgeBaseSourceBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                s3:signatureversion: "AWS4-HMAC-SHA256"
           - Sid: DenyUnencryptedWrites
             Effect: Deny
             Principal: "*"

@@ -158,6 +158,8 @@ Resources:
             { "Fn::ImportValue": !Sub "${DataStackName}-EntitlementTableName" }
           TOKEN_REVOCATION_TABLE:
             { "Fn::ImportValue": !Sub "${DataStackName}-RevocationTableName" }
+          API_RESOURCE_IDENTIFIER:
+            { "Fn::ImportValue": !Sub "${CognitoStackName}-ApiResourceIdentifier" }
           CLOCK_SKEW_SECONDS: "30"
           NODE_OPTIONS: "--enable-source-maps"
       TracingConfig:

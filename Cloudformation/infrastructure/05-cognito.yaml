@@ -41,6 +41,14 @@ Parameters:
   CognitoDomainPrefix:
     Type: String
     AllowedPattern: "^[a-z0-9-]{3,63}$"
+  ApiResourceIdentifier:
+    Type: String
+    Description: >
+      RFC 8707 resource indicator for the inference API, e.g.
+      https://api.example.com. The human client sends this as the `resource`
+      parameter at /oauth2/authorize and Cognito sets it as the access token's
+      aud claim. Must be a URL: https://, http://localhost, or a custom scheme.
+    AllowedPattern: "^(https://|http://localhost|[a-z][a-z0-9+.-]*://).+$"
   AccessTokenMinutes:
     Type: Number
     Default: 15
@@ -254,11 +262,41 @@ Resources:
         - { ScopeName: retrieve, ScopeDescription: Query the knowledge base }
 
   # ==========================================================================
-  # Human app client - authorization code + PKCE
+  # API resource server — RFC 8707 resource binding target
+  #
+  # A second resource server whose identifier is the API URL rather than a bare
+  # name. Resource binding requires the requested `resource` value to be a URL,
+  # so `llm` above cannot serve as the binding target; this one can.
+  #
+  # Scopes are declared here as well because a token bound to this resource
+  # carries scopes from the resource server it is bound to. Callers request
+  # `<ApiResourceIdentifier>/invoke`, not `llm/invoke`, when using binding.
+  # ==========================================================================
+  ApiResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref UserPool
+      Identifier: !Ref ApiResourceIdentifier
+      Name: !Sub "${ApplicationId} inference API (bound)"
+      Scopes:
+        - { ScopeName: invoke, ScopeDescription: Submit a prompt for inference }
+        - { ScopeName: retrieve, ScopeDescription: Query the knowledge base }
+
+  # ==========================================================================
+  # Human app client - authorization code + PKCE, with RFC 8707 resource binding
+  #
+  # The client sends `resource=<ApiResourceIdentifier>` on the /oauth2/authorize
+  # request. Cognito validates it is a URL and sets it as the access token's aud
+  # claim; a refresh carries the same aud forward.
+  #
+  # Resource binding is available in authorization-code and implicit grants from
+  # the Authorize endpoint only, on Managed Login, on Essentials or Plus. It is
+  # NOT available for client_credentials — which is why the machine client below
+  # is unchanged and the authorizer keeps two different client-binding rules.
   # ==========================================================================
   HumanClient:
     Type: AWS::Cognito::UserPoolClient
-    DependsOn: ResourceServer
+    DependsOn: [ResourceServer, ApiResourceServer]
     Properties:
       ClientName: !Sub "${ApplicationId}-${Environment}-human"
       UserPoolId: !Ref UserPool
@@ -267,7 +305,17 @@ Resources:
       GenerateSecret: false
       AllowedOAuthFlows: [code]
       AllowedOAuthFlowsUserPoolClient: true
-      AllowedOAuthScopes: [openid, email, profile, llm/invoke, llm/retrieve]
+      # Both scope sets are permitted. Bound requests use the URL-prefixed
+      # scopes; unbound requests fall back to `llm/*`. The authorizer accepts
+      # either and normalizes them (see the note in the Outputs section).
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+        - llm/invoke
+        - llm/retrieve
+        - !Sub "${ApiResourceIdentifier}/invoke"
+        - !Sub "${ApiResourceIdentifier}/retrieve"
       SupportedIdentityProviders: [COGNITO]
       CallbackURLs: !Ref CallbackUrls
       LogoutURLs: !Ref LogoutUrls
@@ -295,6 +343,11 @@ Resources:
   # No callback URLs, no identity providers, no user context. sub on tokens from
   # this client is the app client ID, not a person - which is why rate limiting
   # and cost attribution key on the tenant claim rather than on sub.
+  #
+  # No resource binding. Cognito does not permit a resource indicator on a
+  # client_credentials grant, so these tokens carry no aud claim at all and
+  # client binding is client_id. That is not a configuration choice and cannot
+  # be worked around at this layer - see the authorizer's two-path validation.
   # ==========================================================================
   MachineClient:
     Type: AWS::Cognito::UserPoolClient
@@ -340,3 +393,14 @@ Outputs:
   TokenEndpoint:
     Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/oauth2/token"
     Export: { Name: !Sub "${AWS::StackName}-TokenEndpoint" }
+  # The authorizer validates aud against this on the human path. Machine tokens
+  # have no aud and are validated on client_id instead.
+  ApiResourceIdentifier:
+    Value: !Ref ApiResourceIdentifier
+    Export: { Name: !Sub "${AWS::StackName}-ApiResourceIdentifier" }
+  # Reference shape for the SPA. The `resource` parameter is what triggers the
+  # aud binding; omitting it yields a token with no aud, which the authorizer
+  # will reject on the human path.
+  AuthorizeRequestExample:
+    Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/oauth2/authorize?response_type=code&client_id=${HumanClient}&resource=${ApiResourceIdentifier}&scope=openid+${ApiResourceIdentifier}/invoke&code_challenge_method=S256&code_challenge=<challenge>&redirect_uri=<callback>"
+    Description: Human-path authorization request including the RFC 8707 resource parameter

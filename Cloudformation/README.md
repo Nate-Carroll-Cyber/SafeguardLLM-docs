@@ -55,10 +55,13 @@ logging closes the content gap CloudTrail structurally cannot cover.
 
 **Identity is scoped on three axes.** A leaked credential must also be presented
 from the expected endpoint, against an enumerated resource, within the
-organization. At the API tier only access tokens are accepted, validated on
-`client_id` — `client_credentials` tokens carry no `aud` claim at all — and
-checked against a revocation denylist that closes the gap offline verification
-otherwise leaves open.
+organization. At the API tier only access tokens are accepted, and the two caller
+paths carry different validation profiles by necessity: human tokens are bound to
+the API via an RFC 8707 resource indicator and validated on `aud`; machine tokens
+cannot carry an audience under `client_credentials` and are validated on
+`client_id`, with the *absence* of `aud` asserted. Both are checked against a
+revocation denylist that closes the gap offline verification otherwise leaves
+open.
 
 ## Status
 
@@ -102,3 +105,7 @@ Carried from the threat model and audit in `docs/`, unresolved in this build:
 | `docs/aws-secure-genai-workload-architecture.md` | The specification these templates implement |
 | `docs/maestro-assessment-aws-genai-workload.md` | MAESTRO v2.0 threat model of the specification |
 | `docs/appsec-audit.md` | Application-layer audit, OWASP LLM Top 10 coverage |
+| `docs/request-flow-detailed.md` | One request end to end — every step, where it is implemented, and what happens when it fails |
+| `docs/authorization-flow-detailed.md` | Token acquisition and validation for both caller paths, and where they diverge |
+| `docs/governance.md` | Agent-governance and control-plane assessment: identity, credentials, authorization, lifecycle, revocation |
+| `docs/control-mapping-aws.md` | AICM / FAIR-CAM / ISO 42001 controls mapped to the templates and source files that implement them |
