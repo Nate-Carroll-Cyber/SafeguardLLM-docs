@@ -1,0 +1,476 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Layer 09b - SPA distribution: S3 origin with Origin Access Control, its own
+  CloudFront distribution, and a browser-tuned edge WAF.
+
+  DEPLOY TO us-east-1, like 09-edge. A Scope: CLOUDFRONT WebACL and the ACM
+  certificate can only exist there.
+
+  Separate from the API distribution deliberately. The two workloads have
+  opposite traffic shapes - the SPA is anonymous, high request count per user,
+  no request bodies; the API is authenticated, low count, large bodies. Three
+  WAF rules invert between them (Bot Control, Anonymous IP, rate-limit key), so
+  one WebACL would force every rule to be a compromise.
+
+  Splitting also removes a failure mode entirely: with one distribution serving
+  both, a cache behavior ordering mistake caches an API response and serves it
+  to the next caller. Two distributions cannot make that mistake.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  ApplicationId:
+    Type: String
+    Default: genai-workload
+  CostCenter:
+    Type: String
+  Owner:
+    Type: String
+  DataClassification:
+    Type: String
+    Default: internal
+  SpaDomainName:
+    Type: String
+    Description: Public FQDN for the app, e.g. app.example.com
+  ApiOrigin:
+    Type: String
+    Description: >
+      Public FQDN of the API distribution, e.g. api.example.com. Used only to
+      build the CSP connect-src so the SPA may call it.
+  HostedZoneId:
+    Type: String
+  CertificateArn:
+    Type: String
+    Description: ACM certificate in us-east-1 covering SpaDomainName
+  EdgeRateLimitPerIp:
+    Type: Number
+    Default: 5000
+    MinValue: 100
+    Description: >
+      Per 5-minute window, per IP. Far higher than the API limit: one page load
+      is dozens of requests, and browser traffic carries no token to key on.
+  BotControlEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Correct here and wrong on the API. This detects non-browser clients; the
+      SPA has only browser clients, while the API's machine callers are
+      non-browser by definition.
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    AllowedValues: [30, 90, 180, 365, 400]
+
+Conditions:
+  UseBotControl: !Equals [!Ref BotControlEnabled, "true"]
+
+Resources:
+
+  # ==========================================================================
+  # S3 origin
+  #
+  # Private. No public access, no ACLs, no website endpoint. CloudFront reaches
+  # it by signing each origin request as the cloudfront.amazonaws.com service
+  # principal; the bucket policy grants that principal and nothing else.
+  # ==========================================================================
+  SpaBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ApplicationId}-${Environment}-spa-${AWS::AccountId}"
+      # SSE-S3, not a CMK. OAC with SSE-KMS requires granting
+      # cloudfront.amazonaws.com kms:Decrypt in the key policy, and
+      # kms:ViaService does not cover it because CloudFront calls KMS as itself.
+      # These are public static assets; the encryption is hygiene, not a control.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-bundles
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  SpaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SpaBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # The AWS:SourceArn condition is the control. Without it, any
+          # CloudFront distribution in any account pointed at this origin can
+          # read it - the service principal alone is not a boundary.
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "${SpaBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${SpaDistribution}"
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt SpaBucket.Arn
+              - !Sub "${SpaBucket.Arn}/*"
+            Condition:
+              Bool: { "aws:SecureTransport": "false" }
+          # Only the deployment role writes. A build artifact reaching this
+          # bucket is code that will execute in an authenticated user's browser.
+          - Sid: RestrictWriters
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub "${SpaBucket.Arn}/*"
+            Condition:
+              StringNotLike:
+                aws:PrincipalArn: "arn:aws:iam::*:role/*CfnServiceRole"
+
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${ApplicationId}-${Environment}-spa-oac"
+        Description: SigV4 signing for the SPA origin
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ==========================================================================
+  # Edge WAF - browser-tuned
+  #
+  # Three rules differ from the API WebACL, and each inversion is deliberate:
+  #   Bot Control   ON here, OFF there  - MCP callers are non-browser by design
+  #   Anonymous IP  BLOCK here, COUNT there - datacenter traffic is expected on
+  #                 the API and suspect on a login page
+  #   Rate limit    IP-keyed and high here, token-keyed and low there - browser
+  #                 requests carry no Authorization header to aggregate on
+  # ==========================================================================
+  SpaWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "${ApplicationId}-${Environment}-spa-edge"
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${ApplicationId}-${Environment}-spa-edge"
+      Rules:
+
+        - Name: ip-reputation
+          Priority: 0
+          OverrideAction: { None: {} }
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: ip-reputation
+
+        # Block, not count. The API counts this because MCP servers run in
+        # datacenters; a browser reaching the login page from a hosting provider
+        # range is a different proposition.
+        - Name: anonymous-ip
+          Priority: 1
+          OverrideAction: { None: {} }
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAnonymousIpList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: anonymous-ip
+
+        # Read-only surface. Anything else is reconnaissance.
+        - Name: method-allow-list
+          Priority: 2
+          Action: { Block: { CustomResponse: { ResponseCode: 405 } } }
+          Statement:
+            NotStatement:
+              Statement:
+                OrStatement:
+                  Statements:
+                    - ByteMatchStatement:
+                        FieldToMatch: { Method: {} }
+                        PositionalConstraint: EXACTLY
+                        SearchString: GET
+                        TextTransformations: [{ Priority: 0, Type: NONE }]
+                    - ByteMatchStatement:
+                        FieldToMatch: { Method: {} }
+                        PositionalConstraint: EXACTLY
+                        SearchString: HEAD
+                        TextTransformations: [{ Priority: 0, Type: NONE }]
+                    - ByteMatchStatement:
+                        FieldToMatch: { Method: {} }
+                        PositionalConstraint: EXACTLY
+                        SearchString: OPTIONS
+                        TextTransformations: [{ Priority: 0, Type: NONE }]
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: method-allow-list
+
+        # No SizeRestrictions_BODY override here. The API needs one because
+        # prompts are large; the SPA has no request bodies at all, so the
+        # default is correct and an override would be a gratuitous weakening.
+        - Name: aws-common
+          Priority: 3
+          OverrideAction: { None: {} }
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-common
+
+        - Name: aws-bad-inputs
+          Priority: 4
+          OverrideAction: { None: {} }
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-bad-inputs
+
+        # The expensive rule, and it only runs here. Common tier is inspection
+        # only - the targeted tier adds challenge and token handling at
+        # materially higher cost.
+        - !If
+          - UseBotControl
+          - Name: bot-control
+            Priority: 5
+            OverrideAction: { None: {} }
+            Statement:
+              ManagedRuleGroupStatement:
+                VendorName: AWS
+                Name: AWSManagedRulesBotControlRuleSet
+                ManagedRuleGroupConfigs:
+                  - AWSManagedRulesBotControlRuleSet:
+                      InspectionLevel: COMMON
+            VisibilityConfig:
+              SampledRequestsEnabled: true
+              CloudWatchMetricsEnabled: true
+              MetricName: bot-control
+          - !Ref AWS::NoValue
+
+        # IP-keyed, high ceiling. Token aggregation is meaningless here - static
+        # asset requests carry no Authorization header, so every request would
+        # land in one bucket and one active user would throttle everyone.
+        - Name: volumetric-rate-limit
+          Priority: 6
+          Action: { Block: { CustomResponse: { ResponseCode: 429 } } }
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref EdgeRateLimitPerIp
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: volumetric-rate-limit
+
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  SpaWafLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "aws-waf-logs-${ApplicationId}-${Environment}-spa-edge"
+      RetentionInDays: !Ref LogRetentionDays
+
+  SpaWafLoggingConfiguration:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt SpaWebAcl.Arn
+      LogDestinationConfigs: [!GetAtt SpaWafLogGroup.Arn]
+
+  # ==========================================================================
+  # Policies
+  # ==========================================================================
+
+  # Static assets are cached. The API distribution caches nothing - that is the
+  # difference the split exists to make safe.
+  SpaCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "${ApplicationId}-${Environment}-spa-cache"
+        Comment: Long TTL for content-hashed bundles
+        DefaultTTL: 86400
+        MinTTL: 0
+        MaxTTL: 31536000
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig: { CookieBehavior: none }
+          HeadersConfig: { HeaderBehavior: none }
+          QueryStringsConfig: { QueryStringBehavior: none }
+
+  # A distinct CSP from the API distribution's. `default-src 'none'` is right
+  # for a JSON API and fatal for an application - it blocks the app's own
+  # scripts and styles. connect-src names the API origin so the SPA may call it.
+  SpaResponseHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "${ApplicationId}-${Environment}-spa-headers"
+        Comment: Security headers for the application
+        SecurityHeadersConfig:
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 63072000
+            IncludeSubdomains: true
+            Preload: true
+            Override: true
+          ContentTypeOptions: { Override: true }
+          FrameOptions: { FrameOption: DENY, Override: true }
+          ReferrerPolicy: { ReferrerPolicy: strict-origin-when-cross-origin, Override: true }
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: !Sub
+              - "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://${Api}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+              - Api: !Ref ApiOrigin
+            Override: true
+        CustomHeadersConfig:
+          Items:
+            - { Header: Permissions-Policy, Value: "geolocation=(), microphone=(), camera=()", Override: true }
+            - { Header: Cross-Origin-Opener-Policy, Value: "same-origin", Override: true }
+
+  # ==========================================================================
+  # Distribution
+  # ==========================================================================
+  SpaDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${ApplicationId} ${Environment} application"
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        WebACLId: !GetAtt SpaWebAcl.Arn
+        Aliases: [!Ref SpaDomainName]
+        DefaultRootObject: index.html
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Origins:
+          - Id: spa-s3
+            # RegionalDomainName, not DomainName. The website endpoint
+            # (s3-website-*) does not accept SigV4, so OAC against it produces
+            # 403 on every object with no indication why.
+            DomainName: !GetAtt SpaBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig:
+              # Must be empty. A value here is the legacy OAI field and
+              # conflicts with OriginAccessControlId.
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: spa-s3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: !Ref SpaCachePolicy
+          ResponseHeadersPolicyId: !Ref SpaResponseHeadersPolicy
+          Compress: true
+        # Client-side routing. With a private bucket and no ListBucket grant, a
+        # missing key returns 403 AccessDenied rather than 404 NoSuchKey, so
+        # deep links fail unless both are mapped back to the app shell.
+        # ErrorCachingMinTTL 0 keeps a deploy-time gap from being cached.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # DNS
+  # ==========================================================================
+  SpaAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref SpaDomainName
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt SpaDistribution.DomainName
+        EvaluateTargetHealth: false
+
+  SpaAliasRecordIpv6:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref SpaDomainName
+      Type: AAAA
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt SpaDistribution.DomainName
+        EvaluateTargetHealth: false
+
+Outputs:
+  SpaBucketName:
+    Value: !Ref SpaBucket
+    Description: Upload the built bundle here; invalidate index.html after deploy
+  SpaDistributionId:
+    Value: !Ref SpaDistribution
+  SpaUrl:
+    Value: !Sub "https://${SpaDomainName}"
+    Description: Add this to the API's ALLOWED_ORIGINS and to Cognito CallbackUrls
+  SpaWebAclArn:
+    Value: !GetAtt SpaWebAcl.Arn

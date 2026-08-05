@@ -19,6 +19,7 @@ changeset.
 | 07 | `07-compute.yaml` | **delivered** | 01–06 |
 | 08 | `08-api.yaml` | **delivered** | 00, 07 |
 | 09 | `09-edge.yaml` | **delivered** | 08 — **deploy to us-east-1** |
+| 09b | `09b-spa-edge.yaml` | **delivered** | — **deploy to us-east-1** |
 | 10 | `10-observability.yaml` | **delivered** | 00, 06, 08 |
 | 11 | `11-log-delivery.yaml` | **delivered** | 08, 10, **20** |
 | 12 | `12-backup-plan.yaml` | **delivered** | 04, **21** |
@@ -402,6 +403,58 @@ disclosure with no attacker involved.
 The **origin request policy** is the least-discussed control here and the most
 structural: an explicit allow-list of headers that cross into the region, which
 turns header smuggling into a problem of defeating a whitelist.
+
+## What layer 09b does
+
+The SPA: private S3 bucket with Origin Access Control, its own CloudFront
+distribution, its own edge WAF.
+
+**Two distributions rather than one, deliberately.** With a single distribution
+serving both workloads, a cache-behavior ordering mistake caches an API response
+and serves it to the next caller — a cross-tenant disclosure with no attacker
+involved. Two distributions cannot make that mistake.
+
+**Three WAF rules invert between the two edge WebACLs**, which is the other half
+of the argument:
+
+| Rule | SPA | API |
+|---|---|---|
+| Bot Control | On | **Off** — machine callers are non-browser by design |
+| Anonymous IP | Block | **Count** — MCP servers run in datacenters |
+| Rate limit | IP-keyed, 5000/5min | Token-keyed, 500/5min |
+
+Browser requests carry no `Authorization` header, so token aggregation would put
+every SPA request in one bucket and let one active user throttle everyone. Bot
+Control is also the expensive rule and only runs here.
+
+`SizeRestrictions_BODY` is **not** overridden on this WebACL. The API needs the
+override because prompts are large; the SPA has no request bodies, so the default
+is correct.
+
+**Four OAC details that fail silently if wrong:**
+
+- `RegionalDomainName`, not the website endpoint. `s3-website-*` does not accept
+  SigV4, so OAC against it returns 403 on every object with no indication why.
+- `S3OriginConfig.OriginAccessIdentity` must be an empty string. A value there is
+  the legacy OAI field and conflicts with `OriginAccessControlId`.
+- The bucket policy's `AWS:SourceArn` condition is the actual control. The
+  service principal alone is not a boundary — without the condition, any
+  CloudFront distribution in any account pointed at this origin can read it.
+- SSE-S3, not a CMK. OAC with SSE-KMS needs `cloudfront.amazonaws.com` granted
+  `kms:Decrypt` in the key policy, and `kms:ViaService` does not cover it because
+  CloudFront calls KMS as itself.
+
+**403 is mapped to the app shell alongside 404.** With a private bucket and no
+`ListBucket` grant, a missing key returns AccessDenied rather than NoSuchKey, so
+client-side deep links break unless both are mapped.
+
+**The CSP is distinct from the API's.** `default-src 'none'` is right for a JSON
+API and fatal for an application — it blocks the app's own scripts and styles.
+`connect-src` names the API origin.
+
+**Two cross-stack couplings this creates.** The SPA is now a different origin
+from the API, so `ALLOWED_ORIGINS` on the adapter (layer 07) must include the SPA
+URL, and Cognito's `CallbackUrls` (layer 05) must point at it.
 
 ## What layer 10 does
 
