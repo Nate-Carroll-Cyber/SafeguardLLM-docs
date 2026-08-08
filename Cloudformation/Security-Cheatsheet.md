@@ -4,15 +4,6 @@
 
 ---
 
-## The four-sentence version
-
-- **Network isolation is structural, not conventional.** The compute tier has no `0.0.0.0/0` route. Every AWS call resolves to a VPC endpoint, and `aws:SourceVpce` makes that path a *condition of authorization*.
-- **Guardrails are non-optional.** Three independent layers — identity policy, org SCP, endpoint policy — must all be misconfigured before a model can be invoked unguarded.
-- **The audit trail sits outside the blast radius.** No workload-account principal can reach the audit bucket, the backup vault, or their keys.
-- **Identity is scoped on three axes at once.** A leaked credential must also be presented from the expected endpoint, against an enumerated resource, within the organization.
-
----
-
 ## Route 53
 
 - DNSSEC signing on the hosted zone — prevents response forgery
