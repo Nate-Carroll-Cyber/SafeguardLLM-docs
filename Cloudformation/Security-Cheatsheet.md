@@ -327,16 +327,14 @@ Split into four policies by domain (5,120-char cap):
 
 ---
 
-## If asked "what isn't done"
-
-Answer these directly; the strength of the position is that they are known and named.
+## To-do
 
 - **Corpus ingestion has no content validation.** Writers are restricted; content is not. It is the one injection route that lands *inside* the boundary and bypasses the pre-egress guardrail
 - **Output handling is unspecified** because the downstream consumer is unstated — that also blocks the AI impact assessment
 - **No adversarial regression corpus.** Guardrail quality is inferred from intervention rate, which moves with attack volume rather than control effectiveness
-- **Bearer tokens are not sender-constrained.** Cognito lacks DPoP; closing it needs mTLS or a different IdP
+- **Bearer tokens are not sender-constrained.** Cognito lacks DPoP; closing it needs mTLS or a different IdP. OriginMtlsConfig isn't in the cfn-lint 1.53.3 schema, so the template would fail the gate that every other template passes. Viewer mTLS can be implemented to close the sender-constrained gap.
 - **Five Lambda functions are unwritten** — egress proxy, secrets rotation, lifecycle, pre-token-generation, containment runbook
-- **Nothing is deployed.** 20 templates, `cfn-lint` clean; runtime behaviour unverified
+- **Nothing is deployed.** 20 templates, `cfn-lint` clean; runtime behavior unverified
 
 ---
 
