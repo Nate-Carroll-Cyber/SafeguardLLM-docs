@@ -152,6 +152,21 @@ Resources:
       ParentId: !Ref V1Resource
       PathPart: retrieve
 
+  # Async job collection. GET /v1/jobs/{jobId}
+  JobsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref V1Resource
+      PathPart: jobs
+
+  JobIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref JobsResource
+      PathPart: "{jobId}"
+
   RequestValidator:
     Type: AWS::ApiGateway::RequestValidator
     Properties:
@@ -220,20 +235,49 @@ Resources:
           - Arn: { "Fn::ImportValue": !Sub "${ComputeStackName}-AdapterFunctionArn" }
         TimeoutInMillis: 29000
 
+  # Polling reuses llm/invoke rather than introducing llm/read. Collecting the
+  # result of an invocation is part of that invocation's lifecycle; a separate
+  # scope would create an orphaned capability - permission to read jobs without
+  # permission to create them - that corresponds to no real caller.
+  #
+  # The authorization that matters here is not the scope anyway. It is
+  # dynamodb:LeadingKeys on the submit role: a caller can only address keys under
+  # their own TENANT# prefix, so another tenant's job ID is denied at IAM before
+  # the application evaluates the request. The job ID does not need to be
+  # unguessable.
+  JobPollMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref JobIdResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref ApiAuthorizer
+      RequestParameters:
+        method.request.path.jobId: true
+        method.request.header.X-Request-ID: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Arn}/invocations"
+          - Arn: { "Fn::ImportValue": !Sub "${ComputeStackName}-AdapterFunctionArn" }
+        TimeoutInMillis: 5000
+
   AdapterInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: { "Fn::ImportValue": !Sub "${ComputeStackName}-AdapterFunctionArn" }
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/POST/v1/*"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/v1/*"
 
   # ==========================================================================
   # Deployment and stage
   # ==========================================================================
   Deployment:
     Type: AWS::ApiGateway::Deployment
-    DependsOn: [InferenceMethod, RetrieveMethod]
+    DependsOn: [InferenceMethod, RetrieveMethod, JobPollMethod]
     Properties:
       RestApiId: !Ref RestApi
       Description: !Sub "Deployed by ${AWS::StackName}"
@@ -271,6 +315,7 @@ Resources:
           "tenantId":"$context.authorizer.tenantId",
           "delegated":"$context.authorizer.delegated",
           "audience":"$context.authorizer.audience",
+          "certBound":"$context.authorizer.certBound",
           "authorizerError":"$context.authorizer.error"}
       MethodSettings:
         - ResourcePath: "/*"

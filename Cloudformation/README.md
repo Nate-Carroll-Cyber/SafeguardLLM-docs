@@ -109,3 +109,4 @@ Carried from the threat model and audit in `docs/`, unresolved in this build:
 | `docs/authorization-flow-detailed.md` | Token acquisition and validation for both caller paths, and where they diverge |
 | `docs/governance.md` | Agent-governance and control-plane assessment: identity, credentials, authorization, lifecycle, revocation |
 | `docs/control-mapping-aws.md` | AICM / FAIR-CAM / ISO 42001 controls mapped to the templates and source files that implement them |
+| `docs/briefing-cheat-sheet.md` | Security elements per AWS service, in request-path order — briefing reference |

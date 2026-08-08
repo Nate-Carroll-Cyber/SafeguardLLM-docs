@@ -56,11 +56,21 @@ Resources:
   # ==========================================================================
   # SafeguardExecRole - the Express adapter
   # ==========================================================================
+  # ==========================================================================
+  # SafeguardExecRole - now the WORKER, not the API-facing adapter.
+  #
+  # The async split moved the entire chain here: judge, retrieval, guardrail,
+  # Converse, ledger. The name is unchanged deliberately - layer 02 endpoint
+  # policies name this ARN, and renaming would break them at the network
+  # boundary with no IAM error to point at.
+  #
+  # The API-facing role is SubmitAdapterRole below, and it holds none of this.
+  # ==========================================================================
   SafeguardExecRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub "${ApplicationId}-${Environment}-SafeguardExecRole"
-      Description: Express adapter execution role
+      Description: Async worker execution role - inference, retrieval, ledger
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -99,13 +109,17 @@ Resources:
                 Action:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationId}-${Environment}-adapter:*"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationId}-${Environment}-worker:*"
               - Sid: Tracing
                 Effect: Allow
                 Action:
                   - xray:PutTraceSegments
                   - xray:PutTelemetryRecords
                 Resource: "*"
+              - Sid: AsyncFailureDestination
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${ApplicationId}-${Environment}-worker-failures"
 
         # --- Inference. Two conditions, both required:
         #     GuardrailIdentifier pins the guardrail AND its version.
@@ -182,7 +196,9 @@ Resources:
                   StringEquals:
                     aws:SourceVpce:
                       { "Fn::ImportValue": !Sub "${EndpointStackName}-DynamoDbGatewayEndpointId" }
-              - Sid: BudgetCounters
+              # Refund only on this role. The reservation happens on the submit
+              # path; the worker reconciles estimate against actuals.
+              - Sid: BudgetReconciliation
                 Effect: Allow
                 Action:
                   - dynamodb:UpdateItem
@@ -190,6 +206,23 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-budget"
                 Condition:
+                  StringEquals:
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-DynamoDbGatewayEndpointId" }
+              # Job state transitions and the completed payload. No PutItem -
+              # the worker never creates a job, it only advances one that the
+              # submit path already wrote. A worker that can create jobs can
+              # create work for itself.
+              - Sid: JobStateTransitions
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-jobs"
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys: "TENANT#*"
                   StringEquals:
                     aws:SourceVpce:
                       { "Fn::ImportValue": !Sub "${EndpointStackName}-DynamoDbGatewayEndpointId" }
@@ -250,6 +283,146 @@ Resources:
                 Resource:
                   - { "Fn::ImportValue": !Sub "${KmsStackName}-AppDataKeyArn" }
                   - { "Fn::ImportValue": !Sub "${KmsStackName}-SecretsKeyArn" }
+                  - { "Fn::ImportValue": !Sub "${KmsStackName}-VolatileKeyArn" }
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # SubmitAdapterRole - the API-facing identity
+  #
+  # Holds no inference permission, no retrieval permission, no database access,
+  # and no secret. It reserves budget, writes a QUEUED job, and invokes the
+  # worker. That is the whole capability.
+  #
+  # This is the async split's security dividend, and it is larger than the
+  # latency one: the component reachable from the internet can no longer call a
+  # model, read a corpus, or touch the ledger. A compromise of the synchronous
+  # path yields the ability to enqueue work against the caller's own budget.
+  # ==========================================================================
+  SubmitAdapterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-SubmitAdapterRole"
+      Description: API-facing submit and poll path
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: vpc-eni-management
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EniLifecycle
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+
+        - PolicyName: deny-inference
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Explicit, not merely omitted. An Allow added to this role later -
+              # for a plausible reason, by someone who did not know why the split
+              # exists - cannot override a Deny.
+              - Sid: DenyAllInferenceAndData
+                Effect: Deny
+                Action:
+                  - bedrock:*
+                  - rds-db:connect
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
+
+        - PolicyName: job-lifecycle
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # PutItem to create, GetItem to poll. No UpdateItem: the submit
+              # path never advances a job's state, so it cannot mark one
+              # COMPLETED or forge a payload.
+              - Sid: CreateAndReadJobs
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-jobs"
+                Condition:
+                  # The polling authorization control. A caller can only address
+                  # keys under their own tenant prefix, so another tenant's job
+                  # ID is denied at IAM before the application evaluates it.
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys: "TENANT#*"
+                  StringEquals:
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-DynamoDbGatewayEndpointId" }
+              # Reservation only, on the submit path. The refund is the worker's.
+              - Sid: BudgetReservation
+                Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationId}-${Environment}-budget"
+                Condition:
+                  StringEquals:
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-DynamoDbGatewayEndpointId" }
+
+        - PolicyName: invoke-worker
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Async invoke of exactly one function. InvocationType is not an
+              # IAM condition key, so the Event/RequestResponse choice is the
+              # caller's - which is why the submit function's own timeout is
+              # short: a synchronous invoke would fail before it could block.
+              - Sid: InvokeWorkerOnly
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ApplicationId}-${Environment}-worker"
+
+        - PolicyName: volatile-key
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: JobTableKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource:
+                  - { "Fn::ImportValue": !Sub "${KmsStackName}-VolatileKeyArn" }
+                  - { "Fn::ImportValue": !Sub "${KmsStackName}-AppDataKeyArn" }
+
+        - PolicyName: telemetry
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: OwnLogGroupOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationId}-${Environment}-adapter:*"
+              - Sid: Tracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: "*"
       Tags:
         - { Key: costCenter, Value: !Ref CostCenter }
         - { Key: environment, Value: !Ref Environment }
@@ -583,6 +756,16 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationId}/${Environment}/db-*"
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationId}/${Environment}/origin-verify-*"
+                  # Third-party inference credential. It was previously scoped
+                  # out of rotation entirely - read by EgressProxyRole, rotated
+                  # by nothing. A third-party API key is the credential most
+                  # likely to be long-lived and least likely to be noticed.
+                  #
+                  # Note the rotation SHAPE differs: the DB secret follows the
+                  # Secrets Manager four-step contract against a database, while
+                  # this one requires calling the provider's own API to mint a
+                  # replacement. Same role, different code path.
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationId}/${Environment}/judge-api-key-*"
                 Condition:
                   StringEquals:
                     secretsmanager:resource/AllowRotationLambdaArn:
@@ -690,7 +873,11 @@ Resources:
 Outputs:
   SafeguardExecRoleArn:
     Value: !GetAtt SafeguardExecRole.Arn
+    Description: The worker. Named for continuity with the layer 02 endpoint policies.
     Export: { Name: !Sub "${AWS::StackName}-SafeguardExecRoleArn" }
+  SubmitAdapterRoleArn:
+    Value: !GetAtt SubmitAdapterRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-SubmitAdapterRoleArn" }
   KBRetrieveRoleArn:
     Value: !GetAtt KBRetrieveRole.Arn
     Export: { Name: !Sub "${AWS::StackName}-KBRetrieveRoleArn" }

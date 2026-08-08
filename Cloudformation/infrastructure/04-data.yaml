@@ -52,6 +52,15 @@ Parameters:
   LedgerContentTtlDays:
     Type: Number
     Default: 30
+  JobTtlHours:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 24
+    Description: >
+      How long a completed job payload survives. Long enough for exponential
+      backoff polling and a network reconnect; short enough that raw model
+      output does not outlive a user session.
   DeletionProtectionEnabled:
     Type: String
     Default: "true"
@@ -434,6 +443,50 @@ Resources:
         - { Key: dataClassification, Value: !Ref DataClassification }
         - { Key: owner, Value: !Ref Owner }
 
+  # --- Async job table.
+  #
+  #     pk = TENANT#<id> is the whole security design in one line: the existing
+  #     dynamodb:LeadingKeys condition transfers unchanged, so a caller polling
+  #     another tenant's job ID is denied at IAM before the application sees the
+  #     request. A guessable job ID stops mattering.
+  #
+  #     Expire on TTL, never delete-on-read. If the client drops the connection
+  #     before parsing the payload, delete-on-read loses a response the caller
+  #     has already been billed for.
+  #
+  #     Own CMK. This table holds raw model output - the content category the
+  #     ledger deliberately excludes.
+  JobTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${ApplicationId}-${Environment}-jobs"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: { "Fn::ImportValue": !Sub "${KmsStackName}-VolatileKeyArn" }
+      # No PITR. A two-hour content store does not want a 35-day continuous
+      # backup of raw model output sitting behind it.
+      DeletionProtectionEnabled: !Ref DeletionProtectionEnabled
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: restricted }
+        - { Key: owner, Value: !Ref Owner }
+        - { Key: jobTtlHours, Value: !Ref JobTtlHours }
+
 Outputs:
   ClusterEndpoint:
     Value: !GetAtt DbCluster.Endpoint.Address
@@ -465,3 +518,9 @@ Outputs:
   RevocationTableName:
     Value: !Ref RevocationTable
     Export: { Name: !Sub "${AWS::StackName}-RevocationTableName" }
+  JobTableName:
+    Value: !Ref JobTable
+    Export: { Name: !Sub "${AWS::StackName}-JobTableName" }
+  JobTtlHours:
+    Value: !Ref JobTtlHours
+    Export: { Name: !Sub "${AWS::StackName}-JobTtlHours" }

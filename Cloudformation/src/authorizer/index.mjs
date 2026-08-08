@@ -39,6 +39,7 @@
  * @aws-sdk/lib-dynamodb.
  */
 
+import crypto from "node:crypto";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
@@ -59,6 +60,14 @@ const REVOCATION_TABLE = required("TOKEN_REVOCATION_TABLE");
 // their aud claim; a token without it was issued without the `resource`
 // parameter and is not bound to this API.
 const API_RESOURCE = required("API_RESOURCE_IDENTIFIER");
+
+// Viewer mTLS. When "true", machine-path callers must present a client
+// certificate whose fingerprint matches their entitlement row. Human callers
+// never need one - a browser cannot hold a client certificate, which is why the
+// CloudFront distribution runs mTLS in `optional` mode and the decision about
+// who must present one is made here rather than at the edge.
+const REQUIRE_CLIENT_CERT_FOR_MACHINE =
+  (process.env.REQUIRE_CLIENT_CERT_FOR_MACHINE ?? "false") === "true";
 
 // RFC 8725 §3.7 — allow a small skew, not an open window. Cognito and Lambda
 // are both NTP-synced, so this is generous.
@@ -178,29 +187,73 @@ async function isRevoked(originJti, sub) {
 // Tenant entitlement
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Client certificate binding
+//
+// This is what makes the machine credential sender-constrained. A leaked client
+// secret alone stops being sufficient: the caller must also hold the private key
+// for a certificate whose fingerprint is provisioned against their client_id.
+//
+// The fingerprint is computed here from the forwarded PEM rather than read from
+// a CloudFront-supplied fingerprint header, so the binding does not depend on
+// header names that may change.
+//
+// CloudFront has already validated the certificate chain against the trust store
+// and proven the client holds the private key. This step is authorization, not
+// authentication: it answers "is THIS certificate the one provisioned for THIS
+// client", which the trust store cannot answer - any certificate from a trusted
+// CA passes the handshake.
+// ---------------------------------------------------------------------------
+
+function certFingerprint(pemHeader) {
+  if (!pemHeader) return null;
+  try {
+    // CloudFront URL-encodes the PEM to survive header transport.
+    const pem = decodeURIComponent(pemHeader);
+    const der = Buffer.from(
+      pem.replace(/-----(BEGIN|END) CERTIFICATE-----/g, "").replace(/\s+/g, ""),
+      "base64",
+    );
+    return crypto.createHash("sha256").update(der).digest("hex");
+  } catch {
+    // A malformed certificate is a failed check, not an error to surface.
+    return null;
+  }
+}
+
 async function resolveTenant(clientId, requestedTenant) {
   const { Item } = await ddb.send(
     new GetCommand({
       TableName: ENTITLEMENT_TABLE,
       Key: { clientId },
-      ProjectionExpression: "defaultTenant, allowedTenants",
+      // certThumbprint added for mTLS binding. Absent on rows provisioned
+      // before mTLS was enabled - see the null handling at the call site.
+      ProjectionExpression: "defaultTenant, allowedTenants, certThumbprint",
       ConsistentRead: true,
     }),
   );
 
-  if (!Item?.defaultTenant) return { tenantId: null, delegated: false };
+  if (!Item?.defaultTenant) {
+    return { tenantId: null, delegated: false, certThumbprint: null };
+  }
 
-  if (!requestedTenant) return { tenantId: Item.defaultTenant, delegated: false };
+  const certThumbprint = Item.certThumbprint ?? null;
+
+  if (!requestedTenant) {
+    return { tenantId: Item.defaultTenant, delegated: false, certThumbprint };
+  }
 
   if (requestedTenant === Item.defaultTenant) {
-    return { tenantId: Item.defaultTenant, delegated: false };
+    return { tenantId: Item.defaultTenant, delegated: false, certThumbprint };
   }
 
   // Acting for another tenant is a delegation, permitted only if provisioned.
   const allowed = new Set(Item.allowedTenants ?? []);
-  if (!allowed.has(requestedTenant)) return { tenantId: null, delegated: true };
+  if (!allowed.has(requestedTenant)) {
+    return { tenantId: null, delegated: true, certThumbprint };
+  }
 
-  return { tenantId: requestedTenant, delegated: true };
+  return { tenantId: requestedTenant, delegated: true, certThumbprint };
 }
 
 // ---------------------------------------------------------------------------
@@ -290,9 +343,46 @@ export const handler = async (event) => {
     return policy("Deny", methodArn, claims.sub, {});
   }
 
-  const { tenantId, delegated } = await resolveTenant(clientId, claims["custom:tenant"]);
+  const { tenantId, delegated, certThumbprint } = await resolveTenant(
+    clientId,
+    claims["custom:tenant"],
+  );
   if (!tenantId) {
     return policy("Deny", methodArn, claims.sub, {});
+  }
+
+  // Certificate binding, machine path only. Runs last because it needs the
+  // entitlement row, and denies for three separate reasons - all of which are
+  // "this credential is not sender-constrained the way it is provisioned to be".
+  let certBound = false;
+  if (REQUIRE_CLIENT_CERT_FOR_MACHINE && callerClass === "machine") {
+    // Header name is case-insensitive at API Gateway but arrives lowercased
+    // through the proxy integration.
+    const pem =
+      event.headers?.["cloudfront-viewer-cert-pem"] ??
+      event.headers?.["CloudFront-Viewer-Cert-Pem"];
+
+    // No certificate presented. The distribution runs in `optional` mode, so
+    // CloudFront let the connection through; this is where a machine caller
+    // without one is stopped.
+    if (!pem) return policy("Deny", methodArn, claims.sub, {});
+
+    // Provisioned without a thumbprint. Fails closed rather than degrading to
+    // bearer-only for that client - a half-enrolled caller is not a caller.
+    if (!certThumbprint) return policy("Deny", methodArn, claims.sub, {});
+
+    const presented = certFingerprint(pem);
+    if (!presented) return policy("Deny", methodArn, claims.sub, {});
+
+    // Timing-safe. The comparison is of public fingerprints rather than
+    // secrets, so the risk is slight - but the cost of doing it correctly is
+    // also slight.
+    const a = Buffer.from(presented, "hex");
+    const b = Buffer.from(String(certThumbprint).toLowerCase(), "hex");
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return policy("Deny", methodArn, claims.sub, {});
+    }
+    certBound = true;
   }
 
   // API Gateway populates this context; a caller cannot influence it. Downstream
@@ -313,5 +403,9 @@ export const handler = async (event) => {
     // Empty on the machine path by construction. Present in the access log so
     // an audit can distinguish a resource-bound token from an unbound one.
     audience: String(claims.aud ?? ""),
+    // Whether this request was additionally bound to a client certificate.
+    // Present in the access log so an audit can separate sender-constrained
+    // calls from bearer-only ones during and after the mTLS rollout.
+    certBound: String(certBound),
   });
 };

@@ -56,6 +56,15 @@ Parameters:
     Type: Number
     Default: 90
     AllowedValues: [30, 90, 180, 365, 400]
+  RequireClientCertForMachine:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Viewer mTLS enforcement for machine callers. Leave false until the
+      CloudFront trust store is live AND every machine client has a
+      certThumbprint provisioned in the entitlement table - the authorizer
+      denies a machine caller whose row lacks one.
   TenantTokenBudget:
     Type: Number
     Default: 1000000
@@ -63,6 +72,13 @@ Parameters:
   AdapterReservedConcurrency:
     Type: Number
     Default: 50
+  WorkerReservedConcurrency:
+    Type: Number
+    Default: 20
+    Description: >
+      The real backpressure control now. The submit path is cheap and fast, so
+      concurrency there bounds little; this is what bounds how much inference
+      can be in flight at once.
   EgressProxyReservedConcurrency:
     Type: Number
     Default: 10
@@ -82,6 +98,15 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub "/aws/lambda/${ApplicationId}-${Environment}-authorizer"
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: { "Fn::ImportValue": !Sub "${KmsStackName}-LogsKeyArn" }
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ApplicationId}-${Environment}-worker"
       RetentionInDays: !Ref LogRetentionDays
       KmsKeyId: { "Fn::ImportValue": !Sub "${KmsStackName}-LogsKeyArn" }
 
@@ -160,6 +185,11 @@ Resources:
             { "Fn::ImportValue": !Sub "${DataStackName}-RevocationTableName" }
           API_RESOURCE_IDENTIFIER:
             { "Fn::ImportValue": !Sub "${CognitoStackName}-ApiResourceIdentifier" }
+          # Set true once the trust store exists and consuming clients are
+          # enrolled with a certThumbprint in the entitlement table. Turning it
+          # on before enrolment denies every machine caller - the check fails
+          # closed on a missing thumbprint by design.
+          REQUIRE_CLIENT_CERT_FOR_MACHINE: !Ref RequireClientCertForMachine
           CLOCK_SKEW_SECONDS: "30"
           NODE_OPTIONS: "--enable-source-maps"
       TracingConfig:
@@ -181,15 +211,21 @@ Resources:
       FunctionName: !Sub "${ApplicationId}-${Environment}-adapter"
       Runtime: nodejs24.x
       Handler: handler.handler
-      Role: { "Fn::ImportValue": !Sub "${IdentityStackName}-SafeguardExecRoleArn" }
+      Role: { "Fn::ImportValue": !Sub "${IdentityStackName}-SubmitAdapterRoleArn" }
       Code:
         S3Bucket: !Ref ArtifactBucket
         S3Key: !Sub "${ArtifactVersion}/adapter.zip"
-      # Must stay under API Gateway's 29 s integration ceiling. With a 25 s judge
-      # cap upstream this leaves roughly 3 s for everything else in the request -
-      # an attacker who slows the judge to 24 s forces 504s across the board.
-      Timeout: 28
-      MemorySize: 1769
+      # 10 s, not 28. The submit path authorizes, reserves budget, writes a
+      # QUEUED job, and async-invokes the worker - nothing on it can legitimately
+      # take longer.
+      #
+      # The short timeout is also a control. lambda:InvocationType is not an IAM
+      # condition key, so nothing at the policy layer stops this function calling
+      # the worker synchronously; a 10 s ceiling means such a call fails rather
+      # than blocking, and the 29 s API Gateway ceiling stops being a constraint
+      # anyone has to negotiate with.
+      Timeout: 10
+      MemorySize: 512
       ReservedConcurrentExecutions: !Ref AdapterReservedConcurrency
       VpcConfig:
         SubnetIds: !Split [",", { "Fn::ImportValue": !Sub "${NetworkStackName}-ComputeSubnetIds" }]
@@ -201,6 +237,66 @@ Resources:
         Variables:
           ALLOWED_ORIGINS: !Join [",", !Ref AllowedOrigins]
           MAX_BODY_BYTES: "32768"
+          JOB_TABLE: { "Fn::ImportValue": !Sub "${DataStackName}-JobTableName" }
+          JOB_TTL_HOURS: { "Fn::ImportValue": !Sub "${DataStackName}-JobTtlHours" }
+          BUDGET_TABLE: { "Fn::ImportValue": !Sub "${DataStackName}-BudgetTableName" }
+          TENANT_TOKEN_BUDGET: !Ref TenantTokenBudget
+          # Upper bound charged at submit: prompt tokens plus max completion.
+          # Reconciled by the worker.
+          MAX_COMPLETION_TOKENS: "2048"
+          WORKER_FUNCTION: !Sub "${ApplicationId}-${Environment}-worker"
+          NODE_OPTIONS: "--enable-source-maps"
+      TracingConfig:
+        Mode: Active
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # Worker
+  #
+  # Everything that used to run inside the 29 s API Gateway ceiling: judge,
+  # retrieval, guardrail, Converse, ledger. Invoked asynchronously, so the
+  # ceiling is Lambda's 15 minutes rather than API Gateway's 29 seconds.
+  #
+  # Async invoke is at-least-once. The worker's first action is a conditional
+  # UpdateItem moving QUEUED to PROCESSING; if that condition fails another
+  # worker already has the job, and this one exits immediately having done
+  # nothing. Without that lock a retry double-writes the ledger and
+  # double-charges the budget.
+  # ==========================================================================
+  WorkerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: WorkerLogGroup
+    Properties:
+      FunctionName: !Sub "${ApplicationId}-${Environment}-worker"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: { "Fn::ImportValue": !Sub "${IdentityStackName}-SafeguardExecRoleArn" }
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Sub "${ArtifactVersion}/worker.zip"
+      # 5 minutes. Generous against generation latency and far short of the
+      # 15-minute ceiling, so a hung job fails rather than occupying a
+      # concurrency slot for a quarter hour.
+      Timeout: 300
+      MemorySize: 1769
+      ReservedConcurrentExecutions: !Ref WorkerReservedConcurrency
+      VpcConfig:
+        SubnetIds: !Split [",", { "Fn::ImportValue": !Sub "${NetworkStackName}-ComputeSubnetIds" }]
+        SecurityGroupIds:
+          - { "Fn::ImportValue": !Sub "${NetworkStackName}-AdapterSecurityGroupId" }
+      # Lambda's own async retry, on top of the idempotency lock. Two attempts
+      # rather than the default two retries: the lock makes a duplicate harmless
+      # but not free, and a job that fails twice is failing for a reason retrying
+      # will not fix.
+      Environment:
+        Variables:
+          JOB_TABLE: { "Fn::ImportValue": !Sub "${DataStackName}-JobTableName" }
+          JOB_TTL_HOURS: { "Fn::ImportValue": !Sub "${DataStackName}-JobTtlHours" }
           GUARDRAIL_IDENTIFIER: { "Fn::ImportValue": !Sub "${BedrockStackName}-GuardrailId" }
           GUARDRAIL_VERSION: { "Fn::ImportValue": !Sub "${BedrockStackName}-GuardrailVersion" }
           INFERENCE_PROFILE_ARN:
@@ -210,20 +306,52 @@ Resources:
           KB_EXTERNAL_ID: !Ref KbRetrieveExternalId
           MAX_RETRIEVED_CHUNKS: "5"
           MAX_CONTEXT_CHARS: "24000"
+          MAX_COMPLETION_TOKENS: "2048"
           RDS_PROXY_HOST: { "Fn::ImportValue": !Sub "${DataStackName}-ProxyEndpoint" }
           RDS_PROXY_PORT: "5432"
           DB_NAME: { "Fn::ImportValue": !Sub "${DataStackName}-DatabaseName" }
           DB_USER: !Sub "${ApplicationId}_app"
           LEDGER_TABLE: { "Fn::ImportValue": !Sub "${DataStackName}-LedgerTableName" }
           BUDGET_TABLE: { "Fn::ImportValue": !Sub "${DataStackName}-BudgetTableName" }
-          TENANT_TOKEN_BUDGET: !Ref TenantTokenBudget
           CONTENT_TTL_DAYS: "30"
           METADATA_TTL_DAYS: "400"
           EGRESS_PROXY_FUNCTION: !Sub "${ApplicationId}-${Environment}-egress-proxy"
+          # Now that generation is off the API Gateway clock, the judge cap can
+          # be set on its own merits rather than against a 29 s budget shared
+          # with a sequential Converse call.
+          JUDGE_TIMEOUT_MS: "25000"
           PG_POOL_MAX: "2"
           NODE_OPTIONS: "--enable-source-maps"
       TracingConfig:
         Mode: Active
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  WorkerAsyncConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref WorkerFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 1
+      # Two hours, matching the job TTL default. A job whose payload has expired
+      # is not worth retrying - the caller can no longer collect the result.
+      MaximumEventAgeInSeconds: 7200
+      DestinationConfig:
+        OnFailure:
+          # Terminal failures land here so a job stuck in PROCESSING is
+          # detectable rather than silently abandoned.
+          Destination: !GetAtt WorkerFailureQueue.Arn
+
+  WorkerFailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ApplicationId}-${Environment}-worker-failures"
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: { "Fn::ImportValue": !Sub "${KmsStackName}-VolatileKeyArn" }
       Tags:
         - { Key: costCenter, Value: !Ref CostCenter }
         - { Key: environment, Value: !Ref Environment }
@@ -414,6 +542,12 @@ Outputs:
   AdapterFunctionArn:
     Value: !GetAtt AdapterFunction.Arn
     Export: { Name: !Sub "${AWS::StackName}-AdapterFunctionArn" }
+  WorkerFunctionArn:
+    Value: !GetAtt WorkerFunction.Arn
+    Export: { Name: !Sub "${AWS::StackName}-WorkerFunctionArn" }
+  WorkerFailureQueueArn:
+    Value: !GetAtt WorkerFailureQueue.Arn
+    Export: { Name: !Sub "${AWS::StackName}-WorkerFailureQueueArn" }
   EgressProxyFunctionArn:
     Value: !GetAtt EgressProxyFunction.Arn
     Export: { Name: !Sub "${AWS::StackName}-EgressProxyFunctionArn" }

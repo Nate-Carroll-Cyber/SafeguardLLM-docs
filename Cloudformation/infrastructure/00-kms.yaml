@@ -354,6 +354,78 @@ Resources:
         - { Key: dataClassification, Value: internal }
         - { Key: owner, Value: !Ref Owner }
 
+  # --------------------------------------------------------------------------
+  # cmk/app-volatile - the async job table
+  #
+  # Separate from cmk/app-data deliberately. The job table holds raw model
+  # OUTPUT until the client collects it - a content store, which is the exact
+  # category the ledger avoids by design (hashes only). Same key for both would
+  # mean one key policy governing both "hashes, retained 400 days" and "raw
+  # completions, retained 2 hours", and the weaker of those two requirements
+  # would win any future policy change.
+  #
+  # A short-lived content store deserves its own blast radius.
+  # --------------------------------------------------------------------------
+  VolatileKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "${ApplicationId} async job payloads (short-lived model output)"
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: KeyAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Sid: AllowDynamoDbUse
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "dynamodb.${AWS::Region}.amazonaws.com"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: restricted }
+        - { Key: owner, Value: !Ref Owner }
+
+  VolatileKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ApplicationId}/${Environment}/app-volatile"
+      TargetKeyId: !Ref VolatileKey
+
   LogsKeyAlias:
     Type: AWS::KMS::Alias
     Properties:
@@ -379,3 +451,6 @@ Outputs:
   LogsKeyArn:
     Value: !GetAtt LogsKey.Arn
     Export: { Name: !Sub "${AWS::StackName}-LogsKeyArn" }
+  VolatileKeyArn:
+    Value: !GetAtt VolatileKey.Arn
+    Export: { Name: !Sub "${AWS::StackName}-VolatileKeyArn" }

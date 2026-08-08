@@ -42,6 +42,34 @@ Parameters:
       Must match the value in the layer 08 WAF rule. The rotation function
       updates both in one operation; a manual change to one alone takes the
       API offline.
+
+      Retained rather than replaced by origin mTLS: AWS::CloudFront::Distribution
+      OriginMtlsConfig is not in the cfn-lint 1.53.3 schema, so adopting it now
+      would break the build-time validation gate. Revisit when the schema lands.
+  ViewerMtlsTrustStoreId:
+    Type: String
+    Default: ""
+    Description: >
+      CloudFront trust store ID for viewer mTLS. Empty disables mTLS entirely.
+
+      Created OUT OF BAND, not by this stack: the AWS::CloudFront::TrustStore
+      resource schema exposes only Name and Tags, so the CA bundle cannot be
+      expressed in CloudFormation. That is arguably correct anyway - a CA bundle
+      changes on a different cadence than the application, and rolling a CA
+      through a stack update is not a property worth having.
+  ViewerMtlsMode:
+    Type: String
+    Default: optional
+    AllowedValues: [optional, required, passthrough]
+    Description: >
+      OPTIONAL is the only workable mode for this distribution. It serves both
+      the SPA's browser XHR - which cannot present a certificate - and MCP
+      machine callers, which can. `required` would break every human user.
+
+      The enforcement is not here: the authorizer requires a certificate for
+      machine-path tokens and does not for human-path ones. CloudFront's job is
+      to validate the certificate and forward it; deciding who needs one is an
+      authorization decision and belongs with the other authorization decisions.
   EdgeRateLimitPerIp:
     Type: Number
     Default: 2000
@@ -78,6 +106,7 @@ Parameters:
     AllowedValues: [30, 90, 180, 365, 400]
 
 Conditions:
+  UseViewerMtls: !Not [!Equals [!Ref ViewerMtlsTrustStoreId, ""]]
   UseGeoRestriction: !Equals [!Ref GeoRestrictionEnabled, "true"]
   UseShieldAdvanced: !Equals [!Ref ShieldAdvancedEnabled, "true"]
   IsCountingAnonymousIp: !Equals [!Ref AnonymousIpAction, count]
@@ -296,6 +325,17 @@ Resources:
             - Content-Type
             - X-Request-ID
             - Origin
+            # Viewer mTLS. CloudFront populates this from the presented client
+            # certificate; the authorizer computes its SHA-256 fingerprint and
+            # matches it against the entitlement row for the calling client_id.
+            #
+            # The PEM header is forwarded to the origin only - it is deliberately
+            # not exposed to edge functions because of its size. That is fine
+            # here: the authorizer runs at the origin.
+            #
+            # Widening this allow-list is the one change mTLS requires to it.
+            # Everything else the policy excludes stays excluded.
+            - CloudFront-Viewer-Cert-Pem
 
   ResponseHeadersPolicy:
     Type: AWS::CloudFront::ResponseHeadersPolicy
@@ -340,6 +380,22 @@ Resources:
           SslSupportMethod: sni-only
           # Enforced at the TLS handshake, before WAF evaluates anything.
           MinimumProtocolVersion: TLSv1.2_2021
+        # Viewer mTLS. Optional mode: CloudFront validates a certificate when
+        # one is presented and still serves callers that present none. The
+        # authorizer decides which callers must present one.
+        ViewerMtlsConfig: !If
+          - UseViewerMtls
+          - Mode: !Ref ViewerMtlsMode
+            TrustStoreConfig:
+              TrustStoreId: !Ref ViewerMtlsTrustStoreId
+              # Do not advertise CA names in the handshake. Advertising them
+              # tells any connecting client which CAs are trusted, which is
+              # reconnaissance for free.
+              AdvertiseTrustStoreCaNames: false
+              # Expiry is enforced. Ignoring it would make certificate rotation
+              # optional, which defeats the point of binding a credential to one.
+              IgnoreCertificateExpiry: false
+          - !Ref AWS::NoValue
         Restrictions: !If
           - UseGeoRestriction
           - GeoRestriction:
@@ -425,6 +481,9 @@ Outputs:
     Description: Pass to layer 08 as CloudFrontDistributionId for the resource policy
   DistributionDomainName:
     Value: !GetAtt Distribution.DomainName
+  ViewerMtlsEnabled:
+    Value: !If [UseViewerMtls, !Ref ViewerMtlsMode, "disabled"]
+    Description: Pass the same state to layer 07 as REQUIRE_CLIENT_CERT_FOR_MACHINE
   EdgeWebAclArn:
     Value: !GetAtt EdgeWebAcl.Arn
   PublicUrl:

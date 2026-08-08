@@ -74,19 +74,35 @@ PKCE protects a public client performing an interactive redirect. It is not a ma
 
 Claim availability differs by token type, and the difference determines what can be validated:
 
-| Claim | ID token | Access token |
-|---|---|---|
-| `aud` | App client ID | **Absent**, unless the client requested an API resource binding — then the target API URL |
-| `client_id` | — | App client ID |
-| `token_use` | `id` | `access` |
-| `scope` | — | Granted OAuth scopes |
-| `sub` | End user | End user, or **the app client ID** on `client_credentials` |
-| `origin_jti` | Revocation identifier | Revocation identifier |
-| `cognito:groups` | Group membership | — |
+| Claim | ID token | Access token — human (auth code) | Access token — machine (`client_credentials`) |
+|---|---|---|---|
+| `aud` | App client ID | The resource identifier, when `resource` was sent | **Absent, and cannot be requested** |
+| `client_id` | — | App client ID | App client ID |
+| `token_use` | `id` | `access` | `access` |
+| `scope` | — | Granted scopes, resource-prefixed when bound | Granted scopes |
+| `sub` | End user | End user | **The app client ID** |
+| `origin_jti` | Revocation identifier | Revocation identifier | Revocation identifier |
+| `cognito:groups` | Group membership | — | — |
 
-The consequence: **an access token issued through `client_credentials` carries no `aud` claim at all.** A validator configured to check `aud` on that path does not fail closed — depending on the library it either errors or silently passes an empty audience set. Client binding on the machine path is established by `client_id`, not `aud`.
+The consequence: **an access token issued through `client_credentials` carries no
+`aud` claim at all.** A validator configured to check `aud` on that path does not
+fail closed — depending on the library it either errors or silently passes an
+empty audience set. Client binding on the machine path is established by
+`client_id`, not `aud`.
 
-Where a true RFC 9068-style audience is required, request an API resource binding at the token endpoint; the issued access token then carries `aud` set to the target API URL, and that value survives refresh.
+**Resource binding closes this on the human path only.** RFC 8707 resource
+indicators are supported: the client sends a `resource` parameter, Cognito
+validates it is a URL and sets it as the access token's `aud`, and a refresh
+carries that value forward. The feature is available in authorization-code and
+implicit grants from the Authorize endpoint, on Managed Login, on the Essentials
+or Plus tier.
+
+It is **not** available on `client_credentials` — a resource indicator cannot be
+requested on that grant, so machine tokens have no audience and cannot be given
+one. This is a platform constraint, not a configuration choice, and it is why the
+two paths carry genuinely different validation rules rather than one rule with an
+exception. RFC 8725 §3.10 asks for mutually exclusive validation rules per token
+type; here the platform enforces that whether or not it is wanted.
 
 ### 4.4 Validation matrix
 
@@ -94,13 +110,25 @@ The authorizer performs the following checks. Every row is mandatory; a token fa
 
 | Check | Human path | Machine path |
 |---|---|---|
-| Signature | RS256 against the pinned JWKS | RS256 against the pinned JWKS |
-| `iss` | Exact user pool issuer URL, hardcoded | Same |
-| `token_use` | `id` or `access`, matching what the route expects | `access` |
-| Client binding | `aud` equals a permitted app client ID | **`client_id`** equals a permitted app client ID — or `aud` equals the API URL where resource binding is enabled |
-| Authorization | `cognito:groups` or `scope` | `scope` contains the scope required by the method |
-| `exp` / `nbf` | Enforced with minimal clock skew | Same |
-| Tenant | Tenant claim present and known | Delegated tenant claim present and known (§4.6) |
+| Signature | RS256 against the pinned JWKS | Same |
+| `iss` | Exact user pool issuer URL, derived from `userPoolId` | Same |
+| `token_use` | `access` | `access` |
+| Client binding | `client_id` ∈ permitted set **and** `aud` equals the resource identifier | `client_id` ∈ permitted set |
+| Audience | **Required.** Absent or mismatched → deny | **Must be absent.** Present → deny |
+| Authorization | `scope` contains either accepted form for the method | `scope` contains the bare form for the method |
+| `exp` / `nbf` | Enforced, 30s skew | Same |
+| Tenant | Entitlement resolved server-side (§4.6) | Same |
+| Revocation | `origin_jti` and `sub` denylist, consistent read, fails closed | Same |
+
+**ID tokens are not accepted on either path.** Every route requires a scope, ID
+tokens carry none, so an ID-token verifier could never succeed. A fallback that
+cannot succeed is worse than absent — it reads as though ID tokens are accepted
+somewhere.
+
+**The machine-path audience row is not symmetry for its own sake.** A machine
+token carrying an audience was not issued by the grant that path expects.
+Asserting its absence catches a future change that moves a client between paths
+without moving its validation rule — which would otherwise pass silently.
 
 ### 4.5 Authorizer implementation
 

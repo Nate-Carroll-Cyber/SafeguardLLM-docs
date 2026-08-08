@@ -88,13 +88,169 @@ Resources:
                 Action:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !GetAtt InvocationLogGroup.Arn
+                Resource:
+                  - !GetAtt InvocationLogGroup.Arn
+                  - !Sub "${InvocationLogGroup.Arn}:log-stream:*"
       Tags:
         - { Key: costCenter, Value: !Ref CostCenter }
         - { Key: environment, Value: !Ref Environment }
         - { Key: applicationId, Value: !Ref ApplicationId }
         - { Key: dataClassification, Value: restricted }
         - { Key: owner, Value: !Ref Owner }
+
+  # ==========================================================================
+  # Enabling model invocation logging
+  #
+  # There is no CloudFormation resource type for this. Model invocation logging
+  # is an ACCOUNT-LEVEL, REGION-LEVEL setting set by PutModelInvocationLogging-
+  # Configuration - one configuration per account per region, not a per-resource
+  # property. A custom resource is the only way to manage it declaratively.
+  #
+  # Two consequences worth knowing before deploying this:
+  #
+  #   1. It is account-global. Two stacks in one account and region will fight
+  #      over it, last writer winning. Deploy this from exactly one stack.
+  #   2. Delete removes logging for the whole account/region, not just for this
+  #      workload. The Delete branch below therefore does nothing - tearing down
+  #      a stack should not silently disable the content audit trail for
+  #      everything else. Disabling is a deliberate manual act.
+  #
+  # Without this, the log group, the InvocationLogRole, the guardrail metric
+  # filter, the intervention-drop alarm, and the layer 11 Firehose export are
+  # all wired to a stream that receives nothing.
+  # ==========================================================================
+  InvocationLoggingEnablerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationId}-${Environment}-InvocationLoggingEnabler"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: manage-invocation-logging
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ManageLoggingConfig
+                Effect: Allow
+                Action:
+                  - bedrock:PutModelInvocationLoggingConfiguration
+                  - bedrock:GetModelInvocationLoggingConfiguration
+                  - bedrock:DeleteModelInvocationLoggingConfiguration
+                Resource: "*"
+              # Bedrock validates at configuration time that it can actually
+              # write to the destination, by assuming the role passed to it.
+              # Without PassRole the API call fails with a permissions error
+              # that names Bedrock rather than this function.
+              - Sid: PassLoggingRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt InvocationLogRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: bedrock.amazonaws.com
+              - Sid: OwnLogGroupOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ApplicationId}-${Environment}-invocation-logging-enabler:*"
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  InvocationLoggingEnablerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationId}-${Environment}-invocation-logging-enabler"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt InvocationLoggingEnablerRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          import {
+            BedrockClient,
+            PutModelInvocationLoggingConfigurationCommand,
+          } from "@aws-sdk/client-bedrock";
+
+          const bedrock = new BedrockClient({});
+
+          const respond = async (event, status, reason) => {
+            const body = JSON.stringify({
+              Status: status,
+              Reason: reason ?? "see CloudWatch",
+              PhysicalResourceId: event.PhysicalResourceId ?? "model-invocation-logging",
+              StackId: event.StackId,
+              RequestId: event.RequestId,
+              LogicalResourceId: event.LogicalResourceId,
+              Data: {},
+            });
+            await fetch(event.ResponseURL, {
+              method: "PUT",
+              headers: { "content-type": "", "content-length": String(body.length) },
+              body,
+            });
+          };
+
+          export const handler = async (event) => {
+            try {
+              // Delete does nothing on purpose. This setting is account and
+              // region wide; removing it on stack teardown would disable the
+              // content audit trail for every other workload in the account.
+              if (event.RequestType === "Delete") {
+                return respond(event, "SUCCESS", "delete is a no-op by design");
+              }
+
+              const p = event.ResourceProperties;
+              await bedrock.send(
+                new PutModelInvocationLoggingConfigurationCommand({
+                  loggingConfig: {
+                    textDataDeliveryEnabled: true,
+                    imageDataDeliveryEnabled: false,
+                    embeddingDataDeliveryEnabled: false,
+                    cloudWatchConfig: {
+                      logGroupName: p.LogGroupName,
+                      roleArn: p.RoleArn,
+                    },
+                  },
+                }),
+              );
+              return respond(event, "SUCCESS");
+            } catch (err) {
+              // Surface the failure to CloudFormation rather than letting the
+              // stack succeed with logging silently off - which is the exact
+              // failure this resource exists to prevent.
+              return respond(event, "FAILED", err?.name ?? "PutLoggingConfigFailed");
+            }
+          };
+      Tags:
+        - { Key: costCenter, Value: !Ref CostCenter }
+        - { Key: environment, Value: !Ref Environment }
+        - { Key: applicationId, Value: !Ref ApplicationId }
+        - { Key: dataClassification, Value: !Ref DataClassification }
+        - { Key: owner, Value: !Ref Owner }
+
+  ModelInvocationLogging:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt InvocationLoggingEnablerFunction.Arn
+      LogGroupName: !Ref InvocationLogGroup
+      RoleArn: !GetAtt InvocationLogRole.Arn
+      # Changing either value above triggers an Update, which re-puts the
+      # configuration. Bumping this forces a re-put without other changes.
+      ConfigVersion: "1"
 
   # ==========================================================================
   # Alarms
