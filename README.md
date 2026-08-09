@@ -24,7 +24,7 @@ Safeguard LLM decouples adversarial defense from response generation by enforcin
 
 ## 🧠 Design Principles
 
-<img width="1306" height="732" alt="SafeguardLLM_Arch_Diagram" src="https://github.com/user-attachments/assets/62e76a60-dfd6-4663-a141-51d364eccf29" />
+<img width="1276" height="716" alt="Screenshot 2026-08-09 at 7 36 41 AM" src="https://github.com/user-attachments/assets/61457cbd-f740-4432-a682-0047996f3181" />
 
 - Treat every prompt as untrusted input
 - Enforce policy before model invocation
