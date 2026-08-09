@@ -240,6 +240,27 @@ Resources:
   # --- cognito-idp: required for JWKS retrieval by a VPC-attached authorizer.
   #     Omitting this is the failure that looks like a broken deployment rather
   #     than a missing endpoint - cold start hangs, every request 500s.
+  #
+  #     DELIBERATELY has no endpoint policy, unlike every other interface endpoint
+  #     here. The authorizer's only use of this service is fetching the pool JWKS
+  #     (.well-known/jwks.json), which aws-jwt-verify does as an ANONYMOUS,
+  #     unsigned GET. An anonymous request carries no principal, so any statement
+  #     conditioned on aws:PrincipalAccount / aws:PrincipalOrgID - or any Principal
+  #     narrowing - denies it, and a policy whose only Allow is authenticated
+  #     produces an implicit deny for the anonymous fetch. Either reproduces the
+  #     silent cold-start failure above. A resource-only Allow is not reliably
+  #     safe either: the JWKS retrieval does not map cleanly to a resource-scoped
+  #     IAM action.
+  #
+  #     The residual risk the account/org backstop would cover - a compromised
+  #     compute-tier role using cognito-idp:* to enumerate or mutate another
+  #     account's user pool - is instead closed at the identity-policy layer:
+  #     no role in this tier is granted any cognito-idp management action (layer
+  #     03), and the authorizer needs none for an anonymous JWKS GET. If a future
+  #     role is granted cognito-idp actions, revisit this: scope THAT role's
+  #     identity policy to the workload pool ARN rather than reopening the risk
+  #     here, since this endpoint cannot express the distinction without breaking
+  #     JWKS. Verify any change with an authorizer cold-start smoke test.
   CognitoIdpEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
@@ -251,6 +272,12 @@ Resources:
       SecurityGroupIds:
         - { "Fn::ImportValue": !Sub "${NetworkStackName}-EndpointSecurityGroupId" }
 
+  # All traffic here is SigV4-signed by the compute-tier execution roles, so a
+  # principal/account condition is safe (unlike cognito-idp below). aws:PrincipalAccount
+  # pinned to this account is the data-perimeter backstop: a role induced to write
+  # to a cross-account log group is denied here even when its identity policy allows
+  # logs:* - CloudWatch Logs is the one exfil channel that IS resource-addressable
+  # cross-account, which is why this endpoint matters most of the three.
   LogsEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
@@ -261,7 +288,26 @@ Resources:
       SubnetIds: !Split [",", { "Fn::ImportValue": !Sub "${NetworkStackName}-ComputeSubnetIds" }]
       SecurityGroupIds:
         - { "Fn::ImportValue": !Sub "${NetworkStackName}-EndpointSecurityGroupId" }
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InAccountLogsOnly
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:PutRetentionPolicy
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
 
+  # PutMetricData does not support resource-level scoping (Resource must be "*"),
+  # so the perimeter is enforced on the principal's account instead.
   MonitoringEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
@@ -272,7 +318,24 @@ Resources:
       SubnetIds: !Split [",", { "Fn::ImportValue": !Sub "${NetworkStackName}-ComputeSubnetIds" }]
       SecurityGroupIds:
         - { "Fn::ImportValue": !Sub "${NetworkStackName}-EndpointSecurityGroupId" }
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InAccountMetricsOnly
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - cloudwatch:PutMetricData
+              - cloudwatch:GetMetricData
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:ListMetrics
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
 
+  # X-Ray write/sampling actions do not support resource-level scoping either;
+  # same principal-account perimeter.
   XRayEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
@@ -283,6 +346,22 @@ Resources:
       SubnetIds: !Split [",", { "Fn::ImportValue": !Sub "${NetworkStackName}-ComputeSubnetIds" }]
       SecurityGroupIds:
         - { "Fn::ImportValue": !Sub "${NetworkStackName}-EndpointSecurityGroupId" }
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InAccountTracingOnly
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - xray:PutTraceSegments
+              - xray:PutTelemetryRecords
+              - xray:GetSamplingRules
+              - xray:GetSamplingTargets
+              - xray:GetSamplingStatisticSummaries
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
 
   # --- The egress proxy needs ApplyGuardrail and Secrets Manager from its own
   #     subnet. Its ENIs are in the egress tier, so the endpoints above (compute

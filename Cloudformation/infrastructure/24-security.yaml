@@ -92,6 +92,16 @@ Resources:
               - kms:GenerateDataKey
               - kms:Decrypt
             Resource: "*"
+            # Confused-deputy guard. Without it, any account able to point one of
+            # these service principals at this key can use it - the service, not
+            # the account, is the principal. aws:SourceAccount pins the call to a
+            # resource in THIS account. Cross-account org alarms still reach the
+            # key through AllowOrgPublish above (ViaService + PrincipalOrgID), so
+            # this tightening removes the confused-deputy path without narrowing
+            # the intended cross-account alerting.
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
       Tags:
         - { Key: costCenter, Value: !Ref CostCenter }
         - { Key: environment, Value: !Ref Environment }

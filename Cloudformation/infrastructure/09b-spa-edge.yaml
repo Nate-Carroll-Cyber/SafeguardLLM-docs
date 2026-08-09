@@ -154,7 +154,10 @@ Resources:
             Resource: !Sub "${SpaBucket.Arn}/*"
             Condition:
               StringNotLike:
-                aws:PrincipalArn: "arn:aws:iam::*:role/*CfnServiceRole"
+                # Exact deployment role in this account, not a cross-account
+                # "*:role/*CfnServiceRole" suffix match. This bucket serves code
+                # into authenticated browsers, so the writer must be pinned.
+                aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-CfnServiceRole"
 
   OriginAccessControl:
     Type: AWS::CloudFront::OriginAccessControl

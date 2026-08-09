@@ -100,14 +100,34 @@ export async function findSimilarFingerprints({ tenantId, embedding, threshold =
      LIMIT $4
   `;
 
-  const { rows } = await pool.query(sql, [
-    tenantId,
-    `[${embedding.join(",")}]`,
-    threshold,
-    Math.min(limit, 50),
-  ]);
-
-  return rows;
+  // The WHERE predicate is the primary tenant boundary. The table also carries
+  // FORCE ROW LEVEL SECURITY whose policy reads app.tenant_id (01-bootstrap.sql).
+  // That GUC has to be set on the SAME connection the query runs on, and it never
+  // was here — so the policy saw NULL, `tenant_id = NULL` is never true, and RLS
+  // silently filtered every row, disabling the similarity detector entirely.
+  //
+  // set_config(name, value, is_local=true) sets it for the duration of the
+  // surrounding transaction only, so it cannot leak to another caller on a pooled
+  // connection (RDS Proxy multiplexes) and, being a bound parameter, cannot be
+  // injected the way a `SET app.tenant_id = '...'` string interpolation could.
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+    const { rows } = await client.query(sql, [
+      tenantId,
+      `[${embedding.join(",")}]`,
+      threshold,
+      Math.min(limit, 50),
+    ]);
+    await client.query("COMMIT");
+    return rows;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -113,7 +113,12 @@ Resources:
               ArnNotLike:
                 aws:PrincipalArn:
                   - !Sub "arn:aws:iam::*:role/${BreakGlassRoleName}"
-                  - "arn:aws:iam::*:role/*CfnServiceRole"
+                  # App-prefixed, not "*CfnServiceRole": a bare suffix wildcard
+                  # exempts any role in any in-OU account whose name merely ends
+                  # in CfnServiceRole (e.g. evilCfnServiceRole). The middle "*"
+                  # still spans dev/staging/prod; the account "*" is inherent to
+                  # an org-wide SCP.
+                  - !Sub "arn:aws:iam::*:role/${ApplicationId}-*-CfnServiceRole"
           # A key that cannot be scheduled for deletion is what makes Object Lock
           # meaningful: without this, an administrator renders every archived log
           # unreadable without deleting a single object.
@@ -137,7 +142,12 @@ Resources:
               ArnNotLike:
                 aws:PrincipalArn:
                   - !Sub "arn:aws:iam::*:role/${BreakGlassRoleName}"
-                  - "arn:aws:iam::*:role/*CfnServiceRole"
+                  # App-prefixed, not "*CfnServiceRole": a bare suffix wildcard
+                  # exempts any role in any in-OU account whose name merely ends
+                  # in CfnServiceRole (e.g. evilCfnServiceRole). The middle "*"
+                  # still spans dev/staging/prod; the account "*" is inherent to
+                  # an org-wide SCP.
+                  - !Sub "arn:aws:iam::*:role/${ApplicationId}-*-CfnServiceRole"
 
   # ==========================================================================
   # SCP 3 - Inference governance
@@ -272,7 +282,7 @@ Resources:
             Resource: "*"
             Condition:
               ArnNotLike:
-                aws:PrincipalArn: "arn:aws:iam::*:role/*CfnServiceRole"
+                aws:PrincipalArn: !Sub "arn:aws:iam::*:role/${ApplicationId}-*-CfnServiceRole"
           # Root is denied by default. A total deny with no exception is the
           # common pattern and the wrong one: AWS reserves a handful of tasks
           # that ONLY root can perform - closing an account, changing the root

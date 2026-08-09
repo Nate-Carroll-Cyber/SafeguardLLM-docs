@@ -286,7 +286,11 @@ Resources:
               StringNotLike:
                 aws:PrincipalArn:
                   - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-Ingestion*"
-                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/*CfnServiceRole"
+                  # Exact deployment role, not "*CfnServiceRole": on the corpus
+                  # ingestion boundary the writer allowlist must be as tight as
+                  # possible - a suffix wildcard would exempt any same-account role
+                  # whose name ends in CfnServiceRole.
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-CfnServiceRole"
 
   KnowledgeBase:
     Type: AWS::Bedrock::KnowledgeBase

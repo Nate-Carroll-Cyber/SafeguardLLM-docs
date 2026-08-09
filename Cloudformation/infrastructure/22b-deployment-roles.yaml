@@ -64,7 +64,45 @@ Resources:
               - iam:CreateUser
               - iam:CreateAccessKey
               - iam:CreateLoginProfile
+              - iam:UpdateLoginProfile
             Resource: "*"
+          # A permissions boundary that does not protect itself is not a ceiling.
+          # Without these denies the identity policy below (CreatePolicyVersion,
+          # SetDefaultPolicyVersion on Resource:"*") lets a compromised pipeline
+          # publish a new permissive default version of THIS boundary policy and
+          # dissolve its own containment in one call. Scoped to the boundary ARN so
+          # the role can still manage the managed policies the app stacks define.
+          - Sid: DenyBoundaryPolicyRewrite
+            Effect: Deny
+            Action:
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicyVersion
+              - iam:SetDefaultPolicyVersion
+              - iam:DeletePolicy
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:policy/${ApplicationId}-${Environment}-${BoundaryPolicyName}"
+          # The other escape: rather than rewrite the boundary, repoint it. Deny
+          # any mutation of the deployment roles themselves - swapping their
+          # boundary via PutRolePermissionsBoundary, widening their inline policy,
+          # or loosening their trust. Scoped to the two role ARNs so CloudFormation
+          # can still manage the application roles it creates in other stacks.
+          #
+          # Consequence, and it is deliberate: this stack can no longer be updated
+          # by the role it bounds. Changes to the deployment roles must go through
+          # the break-glass path, not the pipeline - which is the correct custody
+          # for the identity that holds every mutation permission in the account.
+          - Sid: DenyDeploymentRoleSelfMutation
+            Effect: Deny
+            Action:
+              - iam:PutRolePermissionsBoundary
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:UpdateAssumeRolePolicy
+              - iam:DeleteRole
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-CfnServiceRole"
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-CfnDeploymentRole"
           - Sid: DenyRoleCreationWithoutBoundary
             Effect: Deny
             Action:
@@ -75,35 +113,46 @@ Resources:
             Condition:
               StringNotEquals:
                 iam:PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/${ApplicationId}-${Environment}-${BoundaryPolicyName}"
+          # Kept in sync with the Shared-Services copy in 22-pipeline.yaml. The
+          # Update*/Disassociate*/PutObjectRetention forms matter as much as the
+          # Delete*/Stop* forms: weakening a control is not deleting it, and the
+          # target-account boundary is the one that bounds the roles which actually
+          # mutate prod.
           - Sid: DenyAuditAndBackupMutation
             Effect: Deny
             Action:
               - backup:DeleteRecoveryPoint
               - backup:DeleteBackupVault
               - backup:PutBackupVaultLockConfiguration
+              - backup:UpdateRecoveryPointLifecycle
               - cloudtrail:StopLogging
               - cloudtrail:DeleteTrail
+              - cloudtrail:UpdateTrail
               - s3:PutBucketObjectLockConfiguration
+              - s3:PutObjectRetention
             Resource: "*"
           - Sid: DenyKeyDestruction
             Effect: Deny
             Action:
               - kms:ScheduleKeyDeletion
               - kms:DisableKey
+              - kms:DisableKeyRotation
               - kms:PutKeyPolicy
             Resource: "*"
           - Sid: DenyGuardrailDeletion
             Effect: Deny
             Action: bedrock:DeleteGuardrail
             Resource: "*"
-          - Sid: DenyDetectiveControlTampering
+          - Sid: DenyOrganizationsAndDetectiveControls
             Effect: Deny
             Action:
               - organizations:*
               - guardduty:Delete*
+              - guardduty:Disassociate*
               - securityhub:Disable*
               - config:Delete*
               - config:Stop*
+              - macie2:Disable*
             Resource: "*"
 
   # ==========================================================================
@@ -165,10 +214,17 @@ Resources:
                   - iam:CreateOpenIDConnectProvider
                   - iam:TagOpenIDConnectProvider
                 Resource: "*"
+              # Resource scoped to the roles this stack set creates, not "*".
+              # PassedToService alone constrains the destination service but not
+              # WHICH role - with lambda:CreateFunction from PowerUserAccess, an
+              # unscoped PassRole lets any role trusting lambda/rds/etc. be passed
+              # into a controlled function and executed, reaching privileges above
+              # this boundary (PassRole is not limited by the passed role's own
+              # boundary). The name prefix matches the roles the app stacks define.
               - Sid: PassRoleToServices
                 Effect: Allow
                 Action: iam:PassRole
-                Resource: "*"
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-*"
                 Condition:
                   StringEquals:
                     iam:PassedToService:

@@ -90,6 +90,19 @@ Resources:
   # The master credential exists to bootstrap the cluster and to back the proxy.
   # Application access uses rds-db:connect against an IAM-mapped database role,
   # so this secret is never read by the adapter.
+  #
+  # AUTOMATIC ROTATION IS DEFERRED (deliberate, revisit).
+  # There is no AWS::SecretsManager::RotationSchedule on this secret. The
+  # SecretsRotationFunction in layer 07 is the x-origin-verify rotator (its role
+  # holds cloudfront:UpdateDistribution), not an RDS rotator. Wiring master
+  # rotation correctly needs a SecretTargetAttachment plus a PostgreSQLSingleUser
+  # rotation lambda with direct network reachability to the cluster on 5432 -
+  # i.e. a database security-group change in layer 01 - which must be validated
+  # in a non-prod deploy before prod. It is deferred rather than shipped untested
+  # because the blast radius of a broken rotation is proxy authentication.
+  # The residual exposure is bounded: this credential is bootstrap-and-proxy-only,
+  # never read by the application (which authenticates via IAM), and is already
+  # KMS-encrypted, retained, and access-scoped. Track as a hardening follow-up.
   MasterSecret:
     Type: AWS::SecretsManager::Secret
     DeletionPolicy: Retain

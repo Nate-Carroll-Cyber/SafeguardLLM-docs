@@ -229,6 +229,33 @@ Resources:
               - iam:CreateLoginProfile
               - iam:UpdateLoginProfile
             Resource: "*"
+          # A boundary must protect itself. The roles bounded here hold no IAM
+          # mutation permissions today, so this is defense-in-depth rather than a
+          # live gap - but without it, any future grant of CreatePolicyVersion /
+          # PutRolePermissionsBoundary would silently become a self-rewrite escape.
+          # Kept identical to the target-account copy in 22b so the two boundaries
+          # do not drift.
+          - Sid: DenyBoundaryPolicyRewrite
+            Effect: Deny
+            Action:
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicyVersion
+              - iam:SetDefaultPolicyVersion
+              - iam:DeletePolicy
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:policy/${ApplicationId}-${Environment}-DeploymentBoundary"
+          - Sid: DenyDeploymentRoleSelfMutation
+            Effect: Deny
+            Action:
+              - iam:PutRolePermissionsBoundary
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:UpdateAssumeRolePolicy
+              - iam:DeleteRole
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-GitHubOIDCRole"
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ApplicationId}-${Environment}-PipelineExecRole"
           - Sid: DenyRoleCreationWithoutBoundary
             Effect: Deny
             Action:
