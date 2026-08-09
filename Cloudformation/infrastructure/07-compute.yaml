@@ -72,6 +72,13 @@ Parameters:
   AdapterReservedConcurrency:
     Type: Number
     Default: 50
+  EmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+    Description: >
+      Used by the worker for the adversarial-similarity check. Must match the
+      dimension of the pgvector column in sql/01-bootstrap.sql - a mismatch
+      fails at query time, not at deploy time.
   MaxCompletionTokens:
     Type: Number
     Default: 2048
@@ -326,6 +333,8 @@ Resources:
           CONTENT_TTL_DAYS: "30"
           METADATA_TTL_DAYS: "400"
           EGRESS_PROXY_FUNCTION: !Sub "${ApplicationId}-${Environment}-egress-proxy"
+          EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
+          SIMILARITY_THRESHOLD: "0.78"
           # Now that generation is off the API Gateway clock, the judge cap can
           # be set on its own merits rather than against a 29 s budget shared
           # with a sequential Converse call.

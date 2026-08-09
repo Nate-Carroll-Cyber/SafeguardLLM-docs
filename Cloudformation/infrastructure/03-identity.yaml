@@ -153,8 +153,37 @@ Resources:
                 Effect: Allow
                 Action: bedrock:ApplyGuardrail
                 Resource: !Ref GuardrailArn
+              # The adversarial-similarity check needs a vector, and the submit
+              # path deliberately holds no Bedrock permission - so the worker is
+              # the first point in the flow that can produce one.
+              #
+              # Scoped to the embedding model ARN only. Note it is NOT under the
+              # guardrail condition above: a guardrail identifier cannot be
+              # supplied to an embedding call, so including it in that statement
+              # would deny every embedding request.
+              - Sid: AllowEmbeddingModel
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Ref EmbeddingModelArn
+                Condition:
+                  StringEquals:
+                    aws:SourceVpce:
+                      { "Fn::ImportValue": !Sub "${EndpointStackName}-BedrockRuntimeEndpointId" }
               # bedrock:Converse is NOT an IAM action. The Converse API authorizes
               # on InvokeModel, which is granted above.
+
+        - PolicyName: invoke-egress-proxy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Synchronous invoke of one function. The worker has no route to
+              # the egress subnet, so this is the only path to the judge - which
+              # is what makes "the worker cannot reach the internet" a property
+              # of the routing table rather than a firewall rule.
+              - Sid: InvokeEgressProxyOnly
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ApplicationId}-${Environment}-egress-proxy"
 
         - PolicyName: assume-kb-retrieve
           PolicyDocument:

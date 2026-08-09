@@ -164,7 +164,21 @@ export async function reconcileBudget({ tenantId, clientId, reserved, actual }) 
  * payload is capped at 256 KB. That makes this table a prompt store as well as
  * a response store, which is why it has its own CMK and a two-hour TTL.
  */
-export async function createJob({ tenantId, clientId, sub, correlationId, prompt, reserved }) {
+export async function createJob({
+  tenantId,
+  clientId,
+  sub,
+  correlationId,
+  prompt,
+  reserved,
+  // Authorization evidence, captured at submit and carried to the worker.
+  // The worker writes the ledger, and the ledger needs to record whether the
+  // request was audience-bound and certificate-bound at the moment it was
+  // authorized - which only the submit path saw.
+  delegated = false,
+  audience = null,
+  certBound = false,
+}) {
   const jobId = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
 
@@ -181,6 +195,9 @@ export async function createJob({ tenantId, clientId, sub, correlationId, prompt
         correlationId,
         prompt,
         reservedTokens: reserved,
+        delegated,
+        audience,
+        certBound,
         createdAt: now,
         expiresAt: ttl(),
       },
