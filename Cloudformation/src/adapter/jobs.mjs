@@ -37,6 +37,9 @@ const required = (name) => {
 const JOB_TABLE = required("JOB_TABLE");
 const BUDGET_TABLE = required("BUDGET_TABLE");
 const TOKEN_BUDGET = Number(process.env.TENANT_TOKEN_BUDGET ?? 1_000_000);
+// Same variable inference.mjs uses for inferenceConfig.maxTokens. The
+// reservation and the cap must be one value or the estimate is wrong in a
+// direction nobody notices: too low under-reserves, too high over-charges.
 const MAX_COMPLETION_TOKENS = Number(process.env.MAX_COMPLETION_TOKENS ?? 2048);
 const JOB_TTL_HOURS = Number(process.env.JOB_TTL_HOURS ?? 2);
 

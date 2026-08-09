@@ -47,7 +47,10 @@ export function applySecurity(app) {
         if (!origin) return cb(null, true);
         return cb(null, ALLOWED_ORIGINS.includes(origin));
       },
-      methods: ["POST"],
+      // GET is required for the async poll route, GET /v1/jobs/{jobId}.
+      // Without it the browser preflight for that route fails and the SPA can
+      // submit work it can never collect.
+      methods: ["GET", "POST"],
       allowedHeaders: ["Content-Type", "Authorization", "X-Request-ID"],
       credentials: false,
       maxAge: 600,
@@ -80,6 +83,13 @@ export function requestContext(req, _res, next) {
     callerClass: authz.callerClass,
     scopes: (authz.scopes ?? "").split(" ").filter(Boolean),
     delegated: authz.delegated === "true",
+    // Emitted by the authorizer since resource binding and mTLS landed. Lifted
+    // here so the ledger can record whether a request was audience-bound and
+    // certificate-bound - otherwise those checks happen and leave no trace
+    // downstream of the authorizer's own access log.
+    audience: authz.audience || null,
+    certBound: authz.certBound === "true",
+    originJti: authz.originJti || null,
   });
 
   req.correlationId = req.get("X-Request-ID") ?? crypto.randomUUID();

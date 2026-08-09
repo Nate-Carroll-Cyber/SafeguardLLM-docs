@@ -4,6 +4,15 @@
 
 ---
 
+## The four-sentence version
+
+- **Network isolation is structural, not conventional.** The compute tier has no `0.0.0.0/0` route. Every AWS call resolves to a VPC endpoint, and `aws:SourceVpce` makes that path a *condition of authorization*.
+- **Guardrails are non-optional.** Three independent layers — identity policy, org SCP, endpoint policy — must all be misconfigured before a model can be invoked unguarded.
+- **The audit trail sits outside the blast radius.** No workload-account principal can reach the audit bucket, the backup vault, or their keys.
+- **Identity is scoped on three axes at once.** A leaked credential must also be presented from the expected endpoint, against an enumerated resource, within the organization.
+
+---
+
 ## Route 53
 
 - DNSSEC signing on the hosted zone — prevents response forgery
@@ -93,7 +102,7 @@
 - Refresh token rotation — a stolen refresh token is detectable, because the legitimate client's next refresh fails
 - **Pre-token-generation trigger (V3_0)** derives the tenant claim server-side from an entitlement table and *ignores* client-supplied metadata
 
-> Cognito passes client metadata straight through to that trigger. A tenant read from it is a value the *caller* chose. Deriving it makes the claim a fact; reading it makes it an assertion — and an assertion validated only for membership in a known tenant set is the confused-deputy pattern: every credential valid, the authorization decision wrong, the audit trail faithfully recording the attacker's claim.
+> **The single best slide.** Cognito passes client metadata straight through to that trigger. A tenant read from it is a value the *caller* chose. Deriving it makes the claim a fact; reading it makes it an assertion — and an assertion validated only for membership in a known tenant set is the confused-deputy pattern: every credential valid, the authorization decision wrong, the audit trail faithfully recording the attacker's claim.
 
 ---
 
@@ -109,6 +118,8 @@
 6. Scope for this specific method
 7. `client_id` present
 8. **Tenant entitlement** — intersection of requested and provisioned
+
+**Three things to call out:**
 
 - **REQUEST type, per-method cache key.** A TOKEN authorizer keys only on the token; if its policy names a wildcard resource, the first request caches a policy covering every method and the scope check silently stops applying from request two onward
 - **JWKS pinned to the configured issuer**, never read from the token's own `iss` — the difference between key pinning and signature forgery
@@ -158,6 +169,8 @@
 
 - **Pinned to `identifier:version`, not a bare identifier.** A bare identifier lets a guardrail be weakened in place with no deployment and no review
 - Content filters, denied topics (incl. system-prompt disclosure), contextual grounding, PII filters — **BLOCK for credentials, ANONYMIZE for names.** A redacted credential is still a credential the model was shown
+
+### The counter-intuitive one
 > Bedrock evaluates the **whole** message set only when **no** `guardContent` blocks are present. One tagged block narrows evaluation to tagged blocks alone. **Partial tagging is the hazard, not tagging.** We tag everything.
 
 ### Interaction most designs discover in production
@@ -314,7 +327,9 @@ Split into four policies by domain (5,120-char cap):
 
 ---
 
-## To-dos
+## If asked "what isn't done"
+
+Answer these directly; the strength of the position is that they are known and named.
 
 - **Corpus ingestion has no content validation.** Writers are restricted; content is not. It is the one injection route that lands *inside* the boundary and bypasses the pre-egress guardrail
 - **Output handling is unspecified** because the downstream consumer is unstated — that also blocks the AI impact assessment

@@ -47,6 +47,13 @@ const KB_EXTERNAL_ID = required("KB_EXTERNAL_ID");
 const MAX_CHUNKS = Number(process.env.MAX_RETRIEVED_CHUNKS ?? 5);
 const MAX_CONTEXT_CHARS = Number(process.env.MAX_CONTEXT_CHARS ?? 24_000);
 
+// Must be the SAME value the submit path reserves against. It was a literal
+// 2048 here while the reservation read MAX_COMPLETION_TOKENS from the
+// environment - so raising the env var raised the charge without raising the
+// cap, and lowering it under-reserved for a call that could still generate
+// more. One source of truth.
+const MAX_COMPLETION_TOKENS = Number(process.env.MAX_COMPLETION_TOKENS ?? 2048);
+
 const bedrock = new BedrockRuntimeClient({});
 
 // Retrieval runs under an assumed role, not the adapter's own. A compromised
@@ -152,7 +159,7 @@ export function assembleContext(chunks) {
 // Inference
 // ---------------------------------------------------------------------------
 
-export async function infer({ userQuery, groundingSource, auth, correlationId }) {
+export async function infer({ userQuery, groundingSource, auth, correlationId, jobId }) {
   const command = new ConverseCommand({
     // The inference profile ARN, not a bare model ID. Direct foundation-model
     // invocation is denied by SCP and would also escape cost attribution.
@@ -196,7 +203,7 @@ export async function infer({ userQuery, groundingSource, auth, correlationId })
       },
     ],
 
-    inferenceConfig: { maxTokens: 2048, temperature: 0.2 },
+    inferenceConfig: { maxTokens: MAX_COMPLETION_TOKENS, temperature: 0.2 },
 
     // Surfaces in model invocation logs for per-request attribution. Identifiers
     // only — no content, since this metadata is filterable and therefore searchable.
@@ -205,6 +212,10 @@ export async function infer({ userQuery, groundingSource, auth, correlationId })
       clientId: auth.clientId,
       correlationId,
       delegated: String(auth.delegated),
+      // Joins the model invocation log to the job and ledger records. Without
+      // it the content store and the metadata stores cannot be correlated,
+      // which is the whole reason invocation logging exists.
+      jobId: jobId ?? "",
     },
   });
 

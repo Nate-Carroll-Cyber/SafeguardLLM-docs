@@ -129,6 +129,16 @@ const LedgerRecord = z
     sub: z.string().min(1).max(128),
     clientId: z.string().min(1).max(128),
     delegated: z.boolean(),
+    // Async: every ledger entry now belongs to a job. Without this the audit
+    // record and the job record cannot be joined, which is the first thing an
+    // investigation needs.
+    jobId: z.string().uuid(),
+    // Binding evidence. Records whether the request was audience-bound (RFC
+    // 8707) and certificate-bound (viewer mTLS) at the time it was authorized,
+    // so an audit can separate sender-constrained calls from bearer-only ones
+    // during and after the mTLS rollout.
+    audience: z.string().max(512).nullable(),
+    certBound: z.boolean(),
     promptHash: z.string().regex(/^[a-f0-9]{64}$/),
     responseHash: z.string().regex(/^[a-f0-9]{64}$/),
     // Guardrail verdict recorded alongside the hash. Without it, a guarded call
@@ -137,7 +147,9 @@ const LedgerRecord = z
     modelId: z.string().min(1).max(256),
     inputTokens: z.number().int().nonnegative(),
     outputTokens: z.number().int().nonnegative(),
-    verdict: z.enum(["allow", "block", "redact"]),
+    // Aligned with the job state machine: a ledger verdict now corresponds to
+    // the terminal state written to the job table, so the two records agree.
+    verdict: z.enum(["COMPLETED", "BLOCKED", "FAILED"]),
     // The only free-text field, and it is bounded and never rendered as markup.
     reason: z.string().max(512).optional(),
   })
@@ -167,54 +179,20 @@ export async function writeLedgerEntry(record) {
 }
 
 // ---------------------------------------------------------------------------
-// Token budget — tier 1 of the three-tier consumption control
+// Token budget — MOVED
+//
+// consumeBudget() lived here and charged the budget immediately, before a call
+// that was about to happen. The async split makes that model wrong: submit is
+// cheap and returns in milliseconds, so a caller could enqueue far more work
+// than their budget permits before any of it completed and reported its cost.
+//
+// It is now two phases in jobs.mjs — reserveBudget() on the submit path charges
+// an upper bound, reconcileBudget() on the worker refunds the unspent portion.
+//
+// Deleted rather than deprecated. Leaving it importable meant a plausible-
+// looking call site could double-charge: once here, once through the two-phase
+// path, with no error to notice.
 // ---------------------------------------------------------------------------
-
-/**
- * Atomic per-tenant and per-client token accounting.
- *
- * Two counters, deliberately. The tenant counter is the business limit. The
- * client counter exists because a machine caller entitled to act for several
- * tenants could otherwise multiply its budget by rotating the tenant it asserts —
- * per-tenant limits alone do not bound a caller that can choose its tenant.
- *
- * ADD with a ConditionExpression is a single conditional write, so concurrent
- * Lambda invocations cannot both pass the check on a stale read.
- */
-export async function consumeBudget({ tenantId, clientId, tokens }) {
-  const window = new Date().toISOString().slice(0, 10); // daily
-  const now = Math.floor(Date.now() / 1000);
-
-  const charge = async (pk) => {
-    try {
-      await ddb.send(
-        new UpdateCommand({
-          TableName: BUDGET_TABLE,
-          Key: { pk, sk: window },
-          UpdateExpression: "ADD consumed :t SET expiresAt = if_not_exists(expiresAt, :e)",
-          ConditionExpression: "attribute_not_exists(consumed) OR consumed < :limit",
-          ExpressionAttributeValues: {
-            ":t": tokens,
-            ":limit": TOKEN_BUDGET,
-            ":e": now + 3 * 86_400,
-          },
-        }),
-      );
-    } catch (err) {
-      if (err.name === "ConditionalCheckFailedException") {
-        throw Object.assign(new Error("token budget exceeded"), {
-          status: 429,
-          code: "TokenBudgetExceeded",
-          publicMessage: "rate_limited",
-        });
-      }
-      throw err;
-    }
-  };
-
-  await charge(`TENANT#${tenantId}`);
-  await charge(`CLIENT#${clientId}`);
-}
 
 export const hash = (text) => crypto.createHash("sha256").update(text, "utf8").digest("hex");
 

@@ -72,6 +72,16 @@ Parameters:
   AdapterReservedConcurrency:
     Type: Number
     Default: 50
+  MaxCompletionTokens:
+    Type: Number
+    Default: 2048
+    MinValue: 256
+    MaxValue: 8192
+    Description: >
+      Read by BOTH functions and they must agree. The submit path reserves
+      prompt tokens plus this value; the worker passes it as
+      inferenceConfig.maxTokens. Divergence under-reserves or over-charges, and
+      neither shows up as an error.
   WorkerReservedConcurrency:
     Type: Number
     Default: 20
@@ -242,8 +252,8 @@ Resources:
           BUDGET_TABLE: { "Fn::ImportValue": !Sub "${DataStackName}-BudgetTableName" }
           TENANT_TOKEN_BUDGET: !Ref TenantTokenBudget
           # Upper bound charged at submit: prompt tokens plus max completion.
-          # Reconciled by the worker.
-          MAX_COMPLETION_TOKENS: "2048"
+          # Reconciled by the worker, which caps generation at the same value.
+          MAX_COMPLETION_TOKENS: !Ref MaxCompletionTokens
           WORKER_FUNCTION: !Sub "${ApplicationId}-${Environment}-worker"
           NODE_OPTIONS: "--enable-source-maps"
       TracingConfig:
@@ -306,7 +316,7 @@ Resources:
           KB_EXTERNAL_ID: !Ref KbRetrieveExternalId
           MAX_RETRIEVED_CHUNKS: "5"
           MAX_CONTEXT_CHARS: "24000"
-          MAX_COMPLETION_TOKENS: "2048"
+          MAX_COMPLETION_TOKENS: !Ref MaxCompletionTokens
           RDS_PROXY_HOST: { "Fn::ImportValue": !Sub "${DataStackName}-ProxyEndpoint" }
           RDS_PROXY_PORT: "5432"
           DB_NAME: { "Fn::ImportValue": !Sub "${DataStackName}-DatabaseName" }
