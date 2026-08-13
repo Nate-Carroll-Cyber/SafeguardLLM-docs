@@ -1,0 +1,372 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:a8d80635-a78a-4160-a050-bf92550a6faa",
+  "version": 2,
+  "metadata": {
+    "timestamp": "2026-08-13T13:48:16Z",
+    "lifecycles": [{"phase": "operations"}],
+    "tools": {
+      "components": [
+        {"type": "application", "name": "ai-bom-architect (Claude skill)", "version": "2026.08 (2026 CISA Minimum Elements gate)"}
+      ]
+    },
+    "authors": [{"name": "Nate Carroll, AppSec Engineering (Nate-Carroll-Cyber)"}],
+    "component": {
+      "type": "application",
+      "bom-ref": "app:safeguard-llm",
+      "name": "Safeguard LLM",
+      "version": "2.5",
+      "supplier": {"name": "Nate Carroll, AppSec Engineering (Nate-Carroll-Cyber)"},
+      "description": "Adversary-Aware Prompt Firewall & Forwarding Gateway (counter-spy). Secure GenAI control-plane mediating all LLM interactions before inference (Shield-and-Sword pattern).",
+      "licenses": [{"license": {"name": "Proprietary — internal AppSec Engineering; no distribution license"}}],
+      "properties": [
+        {"name": "internalName", "value": "counter-spy"},
+        {"name": "status", "value": "Beta"},
+        {"name": "safeguardEffectivePrompt.sha256", "value": "590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0"}
+      ]
+    },
+    "properties": [
+      {"name": "sbom.signature", "value": "NOT APPLIED — gap G-01. Enveloped JSF signature required before external distribution (NIST FIPS 186-5 approved algorithm)."},
+      {"name": "sbom.unknownsContact", "value": "AppSec Engineering via repository security policy (SECURITY.md) — channel for recipients to query WITHHELD items"},
+      {"name": "regulatory.euAiAct", "value": "High-risk / GPAI-adjacent (deployer duties, Annex IV, 10-yr retention)"},
+      {"name": "regulatory.caAB2013", "value": "Applies to Golden Set/DPO + core seed corpus; third-party model data UNKNOWN (obtain provider disclosures)"},
+      {"name": "regulatory.coSB24205", "value": "Conditional; language-based over-block = algorithmic-discrimination candidate"},
+      {"name": "vex.companion", "value": "safeguard-llm-v2.5.vex.json — all vulnerability/exploitability claims relocated there (no prose CVE assertions in this SBOM)"}
+    ]
+  },
+  "components": [
+    {
+      "type": "machine-learning-model",
+      "bom-ref": "model:gpt-oss-safeguard-20b",
+      "name": "gpt-oss-safeguard-20b",
+      "version": "unknown",
+      "supplier": {"name": "OpenAI"},
+      "purl": "pkg:huggingface/openai/gpt-oss-safeguard-20b",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "description": "Safeguard judge (control-plane decision model). Returns JSON verdict CLEAN|SUSPICIOUS|ADVERSARIAL.",
+      "properties": [
+        {"name": "role", "value": "safeguard-judge"},
+        {"name": "distribution", "value": "Local LM Studio host 192.168.0.183:1234 (distribution point — NOT the producer)"},
+        {"name": "interface", "value": "OpenAI-compatible /v1/chat/completions"},
+        {"name": "hash.disclosure", "value": "UNKNOWN — weights checksum not recorded at pull time; gap G-05"},
+        {"name": "inferenceConfig.disclosure", "value": "UNKNOWN — temperature/top_p undocumented; gap G-06"}
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "bom-ref": "model:gpt-5.4-mini",
+      "name": "gpt-5.4-mini",
+      "version": "unknown",
+      "supplier": {"name": "OpenAI"},
+      "externalReferences": [{"type": "distribution", "url": "https://api.openai.com/v1"}],
+      "licenses": [{"license": {"name": "Proprietary (OpenAI API Terms)"}}],
+      "properties": [
+        {"name": "role", "value": "safeguard-judge (OPENAI preset default)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN — provider-hosted, artifact inaccessible to SBOM author"},
+        {"name": "trainingDataSummary.disclosure", "value": "UNKNOWN — request OpenAI CA AB 2013 disclosure"}
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "bom-ref": "model:gemini-2.5-flash",
+      "name": "gemini-2.5-flash",
+      "version": "unknown",
+      "supplier": {"name": "Google"},
+      "licenses": [{"license": {"name": "Proprietary (Google API Terms)"}}],
+      "properties": [
+        {"name": "role", "value": "downstream-responder (pluggable; production model not fixed)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN — provider-hosted, artifact inaccessible to SBOM author"},
+        {"name": "trainingDataSummary.disclosure", "value": "UNKNOWN — request Google CA AB 2013 disclosure"}
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "bom-ref": "model:nomic-embed-text",
+      "name": "nomic-embed-text",
+      "version": "unknown",
+      "supplier": {"name": "Nomic AI"},
+      "purl": "pkg:huggingface/nomic-ai/nomic-embed-text-v1.5",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "properties": [
+        {"name": "role", "value": "embedding (instruction-similarity monitor, 768-dim)"},
+        {"name": "distribution", "value": "Ollama 0.23.2, host 192.168.0.183:11434 (distribution point — NOT the producer)"},
+        {"name": "egressPolicy", "value": "local/private-network only; public embedding endpoints blocked"},
+        {"name": "hash.disclosure", "value": "UNKNOWN — open-weight but no checksum recorded in repo; gap G-05"}
+      ]
+    },
+    {
+      "type": "data",
+      "bom-ref": "data:seed-corpus",
+      "name": "core pgvector seed corpus",
+      "version": "core-2026-05-10-latest",
+      "supplier": {"name": "Nate Carroll, AppSec Engineering (controlled-prompt-review process)"},
+      "licenses": [{"license": {"name": "Proprietary — internal"}}],
+      "hashes": [
+        {"alg": "SHA-256", "content": "06cb8e18fcebd73ea2933d7a1c3e71979ff8a396fd8531617a2a1509297e5cd5"},
+        {"alg": "SHA-256", "content": "2a98e22110240fe87582865bf5ebace17d97074414c06ef495c53239e295465b"}
+      ],
+      "properties": [
+        {"name": "recordCount", "value": "319"},
+        {"name": "chunkCount", "value": "611"},
+        {"name": "synthetic", "value": "false"},
+        {"name": "integrity", "value": "VERIFIED"},
+        {"name": "pii.disclosure", "value": "WITHHELD (policy: redaction) — adversarial prompt plaintext redacted by design; SHA-256 fingerprints stored, not raw text. Query via sbom.unknownsContact."}
+      ]
+    },
+    {
+      "type": "data",
+      "bom-ref": "data:atlas-test-corpus",
+      "name": "MITRE ATLAS test corpus",
+      "version": "unknown",
+      "supplier": {"name": "MITRE (taxonomy); AppSec Engineering (prompt authoring)"},
+      "licenses": [{"license": {"name": "MITRE ATLAS terms of use (taxonomy); prompts proprietary — internal"}}],
+      "properties": [
+        {"name": "promptCount", "value": "569"},
+        {"name": "integrity.disclosure", "value": "UNKNOWN — no hash marker recorded; gap G-05"}
+      ]
+    },
+    {
+      "type": "data",
+      "bom-ref": "data:golden-set-dpo",
+      "name": "Golden Set / DPO fine-tuning dataset",
+      "version": "unknown",
+      "supplier": {"name": "Nate Carroll, AppSec Engineering (Promote-to-KB HITL process)"},
+      "licenses": [{"license": {"name": "Proprietary — internal"}}],
+      "properties": [
+        {"name": "synthetic", "value": "false"},
+        {"name": "pii.disclosure", "value": "WITHHELD (policy: redaction) — only sanitized/redacted prompts persisted. Query via sbom.unknownsContact."},
+        {"name": "integrity.disclosure", "value": "UNKNOWN — export exists, checksum not documented; gap G-05"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:react",
+      "name": "react",
+      "version": "unknown",
+      "supplier": {"name": "Meta Platforms"},
+      "purl": "pkg:npm/react",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [
+        {"name": "declaredRange", "value": "~19.0.4"},
+        {"name": "resolvedVersion.disclosure", "value": "UNKNOWN — range specifier is not a code delivery; pin from package-lock.json (gap G-02)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN — source from lockfile integrity field (gap G-03)"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:firebase",
+      "name": "firebase",
+      "version": "unknown",
+      "supplier": {"name": "Google"},
+      "purl": "pkg:npm/firebase",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "properties": [
+        {"name": "declaredRange", "value": "^12.12.0"},
+        {"name": "resolvedVersion.disclosure", "value": "UNKNOWN — pin from lockfile (gap G-02)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN (gap G-03)"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:vite",
+      "name": "vite",
+      "version": "unknown",
+      "supplier": {"name": "VoidZero"},
+      "purl": "pkg:npm/vite",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [
+        {"name": "declaredRange", "value": "^8.0.5"},
+        {"name": "resolvedVersion.disclosure", "value": "UNKNOWN — pin from lockfile (gap G-02)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN (gap G-03)"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:express",
+      "name": "express",
+      "version": "unknown",
+      "supplier": {"name": "OpenJS Foundation (Express project)"},
+      "purl": "pkg:npm/express",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [
+        {"name": "declaredRange", "value": "^5.2.1"},
+        {"name": "resolvedVersion.disclosure", "value": "UNKNOWN — pin from lockfile (gap G-02)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN (gap G-03)"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:zod",
+      "name": "zod",
+      "version": "unknown",
+      "supplier": {"name": "Colin McDonnell (zod project)"},
+      "purl": "pkg:npm/zod",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [
+        {"name": "declaredRange", "value": "^4.3.6"},
+        {"name": "resolvedVersion.disclosure", "value": "UNKNOWN — pin from lockfile (gap G-02)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN (gap G-03)"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:pg",
+      "name": "pg",
+      "version": "unknown",
+      "supplier": {"name": "node-postgres project (Brian Carlson)"},
+      "purl": "pkg:npm/pg",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [
+        {"name": "declaredRange", "value": "^8.20.0"},
+        {"name": "resolvedVersion.disclosure", "value": "UNKNOWN — pin from lockfile (gap G-02)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN (gap G-03)"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:pgvector",
+      "name": "pgvector",
+      "version": "unknown",
+      "supplier": {"name": "Andrew Kane (pgvector project)"},
+      "purl": "pkg:npm/pgvector",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [
+        {"name": "declaredRange", "value": "^0.2.1"},
+        {"name": "resolvedVersion.disclosure", "value": "UNKNOWN — pin from lockfile (gap G-02)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN (gap G-03)"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:translated-lara",
+      "name": "@translated/lara",
+      "version": "unknown",
+      "supplier": {"name": "Translated"},
+      "purl": "pkg:npm/%40translated/lara",
+      "properties": [
+        {"name": "declaredRange", "value": "^1.9.0"},
+        {"name": "license.disclosure", "value": "UNKNOWN — no SPDX ID confirmed from package metadata; verify from registry (gap G-07)"},
+        {"name": "resolvedVersion.disclosure", "value": "UNKNOWN — pin from lockfile (gap G-02)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN (gap G-03)"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:dotenv",
+      "name": "dotenv",
+      "version": "unknown",
+      "supplier": {"name": "motdotla (dotenv project)"},
+      "purl": "pkg:npm/dotenv",
+      "licenses": [{"license": {"id": "BSD-2-Clause"}}],
+      "properties": [
+        {"name": "declaredRange", "value": "^17.2.3"},
+        {"name": "resolvedVersion.disclosure", "value": "UNKNOWN — pin from lockfile (gap G-02)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN (gap G-03)"},
+        {"name": "risk", "value": "Planned migration to AWS Secrets Manager"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:react-markdown",
+      "name": "react-markdown",
+      "version": "unknown",
+      "supplier": {"name": "remark.js project (unified collective)"},
+      "purl": "pkg:npm/react-markdown",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [
+        {"name": "declaredRange", "value": "^10.1.0"},
+        {"name": "resolvedVersion.disclosure", "value": "UNKNOWN — pin from lockfile (gap G-02)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN (gap G-03)"},
+        {"name": "note", "value": "No rehype-raw; residual XSS relies on library default"}
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "lib:fast-uri",
+      "name": "fast-uri",
+      "version": "3.1.2",
+      "supplier": {"name": "Fastify project"},
+      "purl": "pkg:npm/fast-uri@3.1.2",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "properties": [
+        {"name": "dependencyClass", "value": "transitive — parent edge unresolved pending lockfile (gap G-04)"},
+        {"name": "hash.disclosure", "value": "UNKNOWN (gap G-03)"}
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "container:pgvector-pg16",
+      "name": "pgvector/pgvector",
+      "version": "pg16",
+      "supplier": {"name": "Andrew Kane (pgvector project)"},
+      "purl": "pkg:docker/pgvector/pgvector@pg16",
+      "licenses": [{"license": {"id": "PostgreSQL"}}],
+      "description": "PostgreSQL 16 with vector extension 0.8.2. tmpfs-backed in demo.",
+      "properties": [
+        {"name": "runtimeUser", "value": "non-root node via su-exec 0.2-r3"},
+        {"name": "hash.disclosure", "value": "UNKNOWN — record image digest (sha256) from registry pull (gap G-03)"}
+      ]
+    }
+  ],
+  "services": [
+    {
+      "name": "counter-spy-backend",
+      "endpoints": ["/v1/intercept", "/v1/translate", "/v1/instruction-monitor/reviewed-adversarial", "/v1/ctf/sam-spade/*", "/healthz"],
+      "authenticated": true,
+      "x-trust-boundary": "Owns provider secrets; browser cannot override provider config",
+      "data": [{"classification": "redacted-prompts + SHA-256 hashes"}],
+      "properties": [
+        {"name": "auth", "value": "shared static bearer token (INTERCEPT_BEARER_TOKEN); JWT/OIDC NOT implemented"},
+        {"name": "port", "value": "18080"}
+      ]
+    },
+    {
+      "name": "Google Firestore",
+      "x-trust-boundary": "Google Cloud US-West2",
+      "data": [{"classification": "audit logs, user profiles, system/governance config, knowledge base, golden set"}],
+      "authenticated": true,
+      "properties": [{"name": "rules", "value": "firestore.rules — no client role self-elevation; admin-only config/system + knowledge_base reads"}]
+    },
+    {
+      "name": "Lara Translate",
+      "endpoints": ["https://api.laratranslate.com"],
+      "x-trust-boundary": "backend-only egress; fails closed if creds absent"
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "app:safeguard-llm",
+      "dependsOn": [
+        "model:gpt-oss-safeguard-20b",
+        "model:gpt-5.4-mini",
+        "model:gemini-2.5-flash",
+        "model:nomic-embed-text",
+        "data:seed-corpus",
+        "data:atlas-test-corpus",
+        "data:golden-set-dpo",
+        "lib:react",
+        "lib:firebase",
+        "lib:vite",
+        "lib:express",
+        "lib:zod",
+        "lib:pg",
+        "lib:pgvector",
+        "lib:translated-lara",
+        "lib:dotenv",
+        "lib:react-markdown",
+        "container:pgvector-pg16"
+      ]
+    },
+    {"ref": "lib:fast-uri", "dependsOn": []}
+  ],
+  "compositions": [
+    {
+      "aggregate": "incomplete",
+      "assemblies": ["app:safeguard-llm"],
+      "properties": [
+        {"name": "gapRegister", "value": "G-01 unsigned SBOM (owner: AppSec Eng; fix: JSF envelope before external distribution) | G-02 unpinned library versions (owner: AppSec Eng; fix: regenerate from package-lock.json via cyclonedx-npm) | G-03 missing library/container hashes (fix: lockfile integrity fields + registry image digest) | G-04 transitive dependency tree absent; fast-uri parent edge unresolved (fix: lockfile-generated graph) | G-05 model weight + dataset checksums unrecorded (fix: hash at pull/export time) | G-06 judge inference config undocumented | G-07 @translated/lara license unverified. INCOMPLETE coverage is a FAILING state per Coverage element — recipients cannot conclude absence = not-affected until G-02/G-04 close."}
+      ]
+    }
+  ]
+}

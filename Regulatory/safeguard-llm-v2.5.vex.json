@@ -1,0 +1,58 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/Nate-Carroll-Cyber/safeguard-llm/vex/safeguard-llm-v2.5-vex-1",
+  "author": "Nate Carroll, AppSec Engineering (Nate-Carroll-Cyber)",
+  "timestamp": "2026-08-13T13:48:16Z",
+  "version": 1,
+  "tooling": "ai-bom-architect (Claude skill) — VEX separation per 2026 CISA Minimum Elements machine-processability practice",
+  "statements": [
+    {
+      "vulnerability": {"name": "CVE-2025-55182"},
+      "products": [{"@id": "pkg:npm/react"}],
+      "status": "fixed",
+      "status_notes": "Producer claim: pinned via ~19.0.4. UNVERIFIED until resolved version confirmed from lockfile (SBOM gap G-02)."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-23864"},
+      "products": [{"@id": "pkg:npm/react"}],
+      "status": "fixed",
+      "status_notes": "Producer claim: pinned via ~19.0.4. UNVERIFIED until resolved version confirmed from lockfile (SBOM gap G-02)."
+    },
+    {
+      "vulnerability": {"name": "CVE-2024-11023"},
+      "products": [{"@id": "pkg:npm/firebase"}],
+      "status": "fixed",
+      "status_notes": "Producer claim: @firebase/auth 1.13.0 mitigates. Transitive component not yet enumerated in SBOM (gap G-04); verify @firebase/auth resolved version."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-39363"},
+      "products": [{"@id": "pkg:npm/vite"}],
+      "status": "fixed",
+      "status_notes": "Producer claim: mitigated at ^8.0.5. UNVERIFIED until resolved version confirmed (gap G-02)."
+    },
+    {
+      "vulnerability": {"name": "GHSA-v2wj-q39q-566r"},
+      "products": [{"@id": "pkg:npm/vite"}],
+      "status": "fixed",
+      "status_notes": "Producer claim: mitigated at ^8.0.5. UNVERIFIED until resolved version confirmed (gap G-02)."
+    },
+    {
+      "vulnerability": {"name": "GHSA-4w7w-66w2-5vf9"},
+      "products": [{"@id": "pkg:npm/vite"}],
+      "status": "fixed",
+      "status_notes": "Producer claim: mitigated at ^8.0.5. UNVERIFIED until resolved version confirmed (gap G-02)."
+    },
+    {
+      "vulnerability": {"name": "GHSA-q3j6-qgpj-74h6"},
+      "products": [{"@id": "pkg:npm/fast-uri@3.1.2"}],
+      "status": "fixed",
+      "status_notes": "Patched at 3.1.2 (pinned, transitive)."
+    },
+    {
+      "vulnerability": {"name": "GHSA-v39h-62p7-jpjc"},
+      "products": [{"@id": "pkg:npm/fast-uri@3.1.2"}],
+      "status": "fixed",
+      "status_notes": "Patched at 3.1.2 (pinned, transitive)."
+    }
+  ]
+}
